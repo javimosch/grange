@@ -112,9 +112,39 @@ func wh_candidates(fields, ops, vals) (ids, mode) {
 
 // q_find / q_count / q_agg are the query layer — pure data-JSON in/out,
 // shared by the CLI verbs and the HTTP server.
+// q_cold_scan streams page groups, matching + collecting up to limit items.
+// mode 2 = count only. Returns (items, n).
+func q_cold_scan(fields, ops, vals, limit, countonly) (items, n) {
+    items = []string{}
+    n = 0
+    maxp := cold_maxp()
+    k := 0
+    while k < maxp {
+        grp := cold_group(k, maxp)
+        gids := keys(grp)
+        i := 0
+        while i < len(gids) {
+            if countonly == 0 && limit > 0 && n >= limit { return }
+            if wh_match(grp[gids[i]], fields, ops, vals) == 1 {
+                if countonly == 0 {
+                    items = append(items, "{\"id\":\"" + jesc(gids[i]) + "\",\"doc\":" + grp[gids[i]] + "}")
+                }
+                n = n + 1
+            }
+            i = i + 1
+        }
+        k = k + 1
+    }
+}
+
 func q_find(wh, limit) (data) {
     gr_sweep_expired()
     fields, ops, vals := wh_pairs(wh)
+    if g_cold == 1 {
+        items, n := q_cold_scan(fields, ops, vals, limit, 0)
+        data = "{\"count\":" + str(n) + ",\"mode\":\"cold-scan\",\"items\":[" + join(items, ",") + "]}"
+        return
+    }
     // range fast path: walk only the sorted segment, no per-doc matching
     if rb_usable(fields, ops) == 1 {
         rb_ensure(fields[0])
@@ -155,6 +185,11 @@ func q_count(wh) (data) {
         data = "{\"count\":" + str(gr_count()) + "}"
         return
     }
+    if g_cold == 1 {
+        items, n := q_cold_scan(fields, ops, vals, 0, 1)
+        data = "{\"count\":" + str(n) + ",\"mode\":\"cold-scan\"}"
+        return
+    }
     // O(1) fast path: a single equality clause on an indexed field
     if len(fields) == 1 && ops[0] == "=" && ix_is_indexed(fields[0]) == 1 {
         data = "{\"count\":" + str(g_bcount[ix_bucket(fields[0], vals[0])]) + ",\"mode\":\"indexed\"}"
@@ -175,6 +210,30 @@ func q_count(wh) (data) {
         i = i + 1
     }
     data = "{\"count\":" + str(n) + ",\"mode\":\"" + mode + "\"}"
+}
+
+func agg_accum(doc, f, sf, mm, gcount, gsums, gmin, gmax) {
+    gtok := ix_field_tok(doc, f)
+    if len(gtok) == 0 { return }
+    gcount[gtok] = gcount[gtok] + 1
+    first := gcount[gtok] == 1
+    j := 0
+    while j < len(sf) {
+        stok := ix_field_tok(doc, sf[j])
+        if len(stok) > 0 { gsums[gtok + "\t" + sf[j]] = gsums[gtok + "\t" + sf[j]] + ix_tok_num(stok) }
+        j = j + 1
+    }
+    j = 0
+    while j < len(mm) {
+        mtok := ix_field_tok(doc, mm[j])
+        if len(mtok) > 0 {
+            mv := ix_tok_num(mtok)
+            mk := gtok + "\t" + mm[j]
+            if first || mv < gmin[mk] { gmin[mk] = mv }
+            if first || mv > gmax[mk] { gmax[mk] = mv }
+        }
+        j = j + 1
+    }
 }
 
 func agg_group(gtok, n, sf, sums) (item) {
@@ -223,38 +282,32 @@ func q_agg_full(f, sumspec, mmspec) (data) {
         data = "{\"group_by\":\"" + jesc(f) + "\",\"mode\":\"indexed\",\"groups\":[" + join(items, ",") + "]}"
         return
     }
-    // scan path
+    // scan path: agg_accum mutates the reference-typed maps; cold collections
+    // stream page groups, hot ones iterate the memtable
     gcount := make(map[string]int)
     gsums := make(map[string]float)
     gmin := make(map[string]float)
     gmax := make(map[string]float)
-    ids := keys(g_mem)
-    i := 0
-    while i < len(ids) {
-        doc := g_mem[ids[i]]
-        gtok := ix_field_tok(doc, f)
-        if len(gtok) > 0 {
-            gcount[gtok] = gcount[gtok] + 1
-            first := gcount[gtok] == 1
-            j := 0
-            while j < len(sf) {
-                stok := ix_field_tok(doc, sf[j])
-                if len(stok) > 0 { gsums[gtok + "\t" + sf[j]] = gsums[gtok + "\t" + sf[j]] + ix_tok_num(stok) }
-                j = j + 1
+    if g_cold == 1 {
+        maxp := cold_maxp()
+        k := 0
+        while k < maxp {
+            grp := cold_group(k, maxp)
+            gi := keys(grp)
+            i := 0
+            while i < len(gi) {
+                agg_accum(grp[gi[i]], f, sf, mm, gcount, gsums, gmin, gmax)
+                i = i + 1
             }
-            j = 0
-            while j < len(mm) {
-                mtok := ix_field_tok(doc, mm[j])
-                if len(mtok) > 0 {
-                    mv := ix_tok_num(mtok)
-                    mk := gtok + "\t" + mm[j]
-                    if first || mv < gmin[mk] { gmin[mk] = mv }
-                    if first || mv > gmax[mk] { gmax[mk] = mv }
-                }
-                j = j + 1
-            }
+            k = k + 1
         }
-        i = i + 1
+    } else {
+        ids := keys(g_mem)
+        i := 0
+        while i < len(ids) {
+            agg_accum(g_mem[ids[i]], f, sf, mm, gcount, gsums, gmin, gmax)
+            i = i + 1
+        }
     }
     gtoks := keys(gcount)
     items := []string{}

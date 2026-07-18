@@ -180,6 +180,7 @@ func ix_load() {
 // kind "" = equality buckets (+ sum registers); kind "range" adds the sorted
 // projection for numeric > < >= <= queries.
 func gr_index_add(f, sums, kind) (ok) {
+    if g_cold == 1 { ok = 0  return }
     if ix_is_indexed(f) == 0 { g_ifields = append(g_ifields, f) }
     g_isums[f] = sums
     g_ikind[f] = kind

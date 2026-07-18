@@ -1,0 +1,339 @@
+// grange cold storage — M18. Disk-resident collections for data bigger than RAM.
+//
+// MFL has no seek/partial read, so the unit of random access is a FILE:
+//   <coll>/cold.flag                     marks the collection cold
+//   <coll>/crun-<gen>-<rid>-p<k>.grg     hash-partitioned page (same checksummed
+//                                        record format as everything else)
+//   <coll>/crun-<gen>-<rid>.cmeta        run manifest {pages,count} (recfile)
+//
+// Pages are hash partitions (fnv32(id) & (P-1)), P a power of 2 — no sorted
+// order needed, so no string sorts. A point get reads exactly ONE page file
+// per run (newest first). Scans and compaction stream one PAGE GROUP at a
+// time (ids sharing hash-suffix k), so RAM stays ~one page regardless of
+// collection size. The memtable holds only unflushed writes (WAL chunks make
+// them durable); a flush writes a new run and drops the chunks.
+//
+// v1 limits (enforced): no secondary indexes, no TTL docs on cold collections.
+
+var g_cold = 0
+var g_tomb = make(map[string]int)
+var g_run_rid = []int{}
+var g_run_pages = []int{}
+var g_run_count = []int{}
+
+func cold_hash(id) (h) {
+    h = 2166136261
+    b := bytes(id)
+    n := len(b)
+    i := 0
+    while i < n {
+        h = ((h ^ byte_at(b, i)) * 16777619) & 4294967295
+        i = i + 1
+    }
+}
+
+func cold_pow2_pages(count) (p) {
+    p = 1
+    while p * 300 < count { p = p * 2 }
+}
+
+func cold_meta_name(rid) (s) {
+    s = "crun-" + gr_pad6(g_gen) + "-" + gr_pad6(rid) + ".cmeta"
+}
+
+func cold_page_name(rid, k) (s) {
+    s = "crun-" + gr_pad6(g_gen) + "-" + gr_pad6(rid) + "-p" + gr_pad6(k) + ".grg"
+}
+
+// cold_load_runs scans the dir for this generation's valid run manifests.
+func cold_load_runs() {
+    g_run_rid = []int{}
+    g_run_pages = []int{}
+    g_run_count = []int{}
+    entries := list_dir(gr_dir())
+    pre := "crun-" + gr_pad6(g_gen) + "-"
+    rids := []int{}
+    i := 0
+    while i < len(entries) {
+        e := entries[i]
+        if has_prefix(e, pre) && has_suffix(e, ".cmeta") {
+            rids = append(rids, parse_int(substr(e, len(pre), len(e) - 6)))
+        }
+        i = i + 1
+    }
+    rids = gr_sort_ints(rids)
+    i = 0
+    while i < len(rids) {
+        lines, nrecs, ok := gr_load_recfile(gr_dir() + "/" + cold_meta_name(rids[i]))
+        if ok == 1 && len(lines) == 2 {
+            pv, perr := json_get(lines[1], ".pages")
+            cv, cverr := json_get(lines[1], ".count")
+            if len(perr) == 0 {
+                g_run_rid = append(g_run_rid, rids[i])
+                g_run_pages = append(g_run_pages, parse_int(pv))
+                g_run_count = append(g_run_count, parse_int(cv))
+            }
+        }
+        i = i + 1
+    }
+}
+
+// cold_flush writes memtable + tombstones as a new run, then drops the WAL
+// chunks (their records now live in pages). Crash-safe: pages then meta then
+// chunk deletion — an incomplete run has no valid meta and is ignored.
+func cold_flush() (ok) {
+    ok = 1
+    ids := keys(g_mem)
+    tombs := keys(g_tomb)
+    total := len(ids) + len(tombs)
+    if total == 0 { return }
+    pcount := cold_pow2_pages(total)
+    rid := 1
+    if len(g_run_rid) > 0 { rid = g_run_rid[len(g_run_rid) - 1] + 1 }
+    // partition into pages
+    k := 0
+    while k < pcount {
+        lines := []string{}
+        nrec := 0
+        i := 0
+        while i < len(ids) {
+            if (cold_hash(ids[i]) & (pcount - 1)) == k {
+                lines = append(lines, "p|" + ids[i])
+                lines = append(lines, g_mem[ids[i]])
+                nrec = nrec + 1
+            }
+            i = i + 1
+        }
+        i = 0
+        while i < len(tombs) {
+            if (cold_hash(tombs[i]) & (pcount - 1)) == k {
+                lines = append(lines, "d|" + tombs[i])
+                nrec = nrec + 1
+            }
+            i = i + 1
+        }
+        if gr_write_recfile(gr_dir() + "/" + cold_page_name(rid, k), lines, nrec) == 0 { ok = 0  return }
+        k = k + 1
+    }
+    meta := []string{}
+    meta = append(meta, "p|meta")
+    meta = append(meta, "{\"pages\":" + str(pcount) + ",\"count\":" + str(total) + "}")
+    if gr_write_recfile(gr_dir() + "/" + cold_meta_name(rid), meta, 1) == 0 { ok = 0  return }
+    g_run_rid = append(g_run_rid, rid)
+    g_run_pages = append(g_run_pages, pcount)
+    g_run_count = append(g_run_count, total)
+    // memtable is now redundant with the run: clear it and its WAL chunks
+    g_mem = make(map[string]string)
+    g_tomb = make(map[string]int)
+    entries := list_dir(gr_dir())
+    pre := "wal-" + gr_pad6(g_gen) + "-"
+    i := 0
+    while i < len(entries) {
+        if has_prefix(entries[i], pre) && has_suffix(entries[i], ".grg") {
+            remove(gr_dir() + "/" + entries[i])
+        }
+        i = i + 1
+    }
+    g_next_chunk = 0
+}
+
+// cold_page_lookup scans one loaded page's lines for id.
+// verdict: 0 absent · 1 put (doc set) · 2 tombstone
+func cold_page_lookup(lines, id) (verdict, doc) {
+    verdict = 0
+    doc = ""
+    i := 0
+    n := len(lines)
+    while i < n {
+        ln := lines[i]
+        if has_prefix(ln, "p|") {
+            if substr(ln, 2, len(ln)) == id {
+                verdict = 1
+                doc = lines[i+1]
+            }
+            i = i + 2
+        } else {
+            if substr(ln, 2, len(ln)) == id { verdict = 2 }
+            i = i + 1
+        }
+    }
+}
+
+// cold_get: memtable, then runs newest-first — ONE page file read per run.
+func cold_get(id) (doc, found) {
+    doc = ""
+    found = 0
+    if has(g_tomb, id) { return }
+    if has(g_mem, id) {
+        doc = g_mem[id]
+        found = 1
+        return
+    }
+    h := cold_hash(id)
+    r := len(g_run_rid) - 1
+    while r >= 0 {
+        k := h & (g_run_pages[r] - 1)
+        lines, nrecs, ok := gr_load_recfile(gr_dir() + "/" + cold_page_name(g_run_rid[r], k))
+        if ok == 1 {
+            verdict, d := cold_page_lookup(lines, id)
+            if verdict == 1 {
+                doc = d
+                found = 1
+                return
+            }
+            if verdict == 2 { return }
+        }
+        r = r - 1
+    }
+}
+
+// cold_group builds page group k (of maxp) as an id->doc map, oldest run
+// first so newer runs and finally the memtable win; tombstones remove.
+func cold_group(k, maxp) (grp) {
+    grp = make(map[string]string)
+    r := 0
+    while r < len(g_run_rid) {
+        pk := k & (g_run_pages[r] - 1)
+        lines, nrecs, ok := gr_load_recfile(gr_dir() + "/" + cold_page_name(g_run_rid[r], pk))
+        if ok == 1 {
+            i := 0
+            n := len(lines)
+            while i < n {
+                ln := lines[i]
+                if has_prefix(ln, "p|") {
+                    id := substr(ln, 2, len(ln))
+                    if (cold_hash(id) & (maxp - 1)) == k { grp[id] = lines[i+1] }
+                    i = i + 2
+                } else {
+                    id := substr(ln, 2, len(ln))
+                    if (cold_hash(id) & (maxp - 1)) == k { delete(grp, id) }
+                    i = i + 1
+                }
+            }
+        }
+        r = r + 1
+    }
+    ids := keys(g_mem)
+    i := 0
+    while i < len(ids) {
+        if (cold_hash(ids[i]) & (maxp - 1)) == k { grp[ids[i]] = g_mem[ids[i]] }
+        i = i + 1
+    }
+    tombs := keys(g_tomb)
+    i = 0
+    while i < len(tombs) {
+        if (cold_hash(tombs[i]) & (maxp - 1)) == k { delete(grp, tombs[i]) }
+        i = i + 1
+    }
+}
+
+func cold_maxp() (p) {
+    p = 1
+    i := 0
+    while i < len(g_run_pages) {
+        if g_run_pages[i] > p { p = g_run_pages[i] }
+        i = i + 1
+    }
+}
+
+// cold_count_all streams every page group (RAM = one group at a time).
+func cold_count_all() (n) {
+    n = 0
+    maxp := cold_maxp()
+    k := 0
+    while k < maxp {
+        n = n + len(keys(cold_group(k, maxp)))
+        k = k + 1
+    }
+}
+
+// cold_compact merges all runs + memtable into one fresh-generation run.
+func cold_compact() (ok) {
+    ok = 0
+    maxp := cold_maxp()
+    total := cold_count_all()
+    newgen := g_gen + 1
+    newp := cold_pow2_pages(total)
+    oldgen := g_gen
+    g_gen = newgen
+    // stream target groups; source groups iterate at max(newp, maxp) grain
+    grain := newp
+    if maxp > grain { grain = maxp }
+    written := 0
+    pagelines := make(map[string]string)
+    k := 0
+    while k < newp {
+        lines := []string{}
+        nrec := 0
+        // source groups whose hash-suffix folds into target page k
+        gsub := k
+        while gsub < grain {
+            g_gen = oldgen
+            grp := cold_group(gsub, grain)
+            g_gen = newgen
+            gids := keys(grp)
+            i := 0
+            while i < len(gids) {
+                lines = append(lines, "p|" + gids[i])
+                lines = append(lines, grp[gids[i]])
+                nrec = nrec + 1
+                i = i + 1
+            }
+            gsub = gsub + newp
+        }
+        if gr_write_recfile(gr_dir() + "/" + cold_page_name(1, k), lines, nrec) == 0 { g_gen = oldgen  return }
+        written = written + nrec
+        k = k + 1
+    }
+    meta := []string{}
+    meta = append(meta, "p|meta")
+    meta = append(meta, "{\"pages\":" + str(newp) + ",\"count\":" + str(written) + "}")
+    if gr_write_recfile(gr_dir() + "/" + cold_meta_name(1), meta, 1) == 0 { g_gen = oldgen  return }
+    // new gen valid: drop every older artifact
+    entries := list_dir(gr_dir())
+    keepmeta := cold_meta_name(1)
+    i := 0
+    while i < len(entries) {
+        e := entries[i]
+        if has_suffix(e, ".grg") || has_suffix(e, ".cmeta") {
+            if has_prefix(e, "crun-" + gr_pad6(newgen) + "-") == false { remove(gr_dir() + "/" + e) }
+        }
+        i = i + 1
+    }
+    g_mem = make(map[string]string)
+    g_tomb = make(map[string]int)
+    g_next_chunk = 0
+    g_run_rid = []int{1}
+    g_run_pages = []int{newp}
+    g_run_count = []int{written}
+    ok = 1
+}
+
+// gr_cold_enable converts the current collection to cold mode.
+func gr_cold_enable() (ok, errmsg) {
+    ok = 0
+    errmsg = ""
+    if g_cold == 1 { ok = 1  return }
+    if len(g_ifields) > 0 { errmsg = "drop indexes first: cold collections have no secondary indexes"  return }
+    if len(keys(g_ttl)) > 0 { errmsg = "cold collections do not support TTL docs"  return }
+    if gr_commit() == 0 { errmsg = "commit failed"  return }
+    if write_file(gr_dir() + "/cold.flag", "1\n") < 0 { errmsg = "cannot write cold.flag"  return }
+    g_cold = 1
+    cold_load_runs()
+    if cold_flush() == 0 { errmsg = "initial flush failed"  return }
+    ok = 1
+}
+
+// cold threshold: flush after this many memtable records (default 2000)
+func cold_threshold() (n) {
+    n = parse_int(env("GRANGE_COLD_MEMTABLE"))
+    if n == 0 { n = 2000 }
+}
+
+// cold_count_est: cheap upper-bound (run record counts + memtable; overwrites
+// and tombstones across runs double-count until compaction) — used by stats.
+func cold_count_est() (n) {
+    n = len(keys(g_mem))
+    i := 0
+    while i < len(g_run_count) { n = n + g_run_count[i]  i = i + 1 }
+}

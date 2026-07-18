@@ -22,6 +22,24 @@ var g_w_deadline = []int{}
 var g_park = 0
 var g_srv_follow = 0
 var g_shutdown = 0
+var g_rss_last = 0
+
+func srv_rss_watchdog() {
+    nowms := now_ms()
+    if nowms - g_rss_last < 60000 { return }
+    g_rss_last = nowms
+    maxmb := parse_int(env("GRANGE_MAX_RSS_MB"))
+    if maxmb == 0 { maxmb = 300 }
+    rss := bench_rss_kb()
+    if rss < maxmb * 1024 { return }
+    // over budget: flush state and let systemd restart us — the crash-safe WAL
+    // makes a restart a cheap arena reset, and eviction bounds what reloads
+    write(2, "{\"event\":\"rss_restart\",\"rss_kb\":" + str(rss) + ",\"max_mb\":" + str(maxmb) + ",\"loaded\":" + str(len(keys(R_loaded))) + "}\n")
+    gr_commit()
+    uok, uerr := gr_use(g_srv_db, "_sys")
+    if uok == 1 { tn_rl_flush()  gr_commit() }
+    exit(0)
+}
 
 func srv_json(status, body) (res) {
     res = response(status, "application/json", body)
@@ -177,7 +195,7 @@ func srv_handle(req) (res) {
         return
     }
     // self-serve tenant signup: a peage wallet is the only credential
-    if req.method == "POST" && req.path == "/tenants" {
+    if req.method == "POST" && (req.path == "/tenants" || has_prefix(req.path, "/tenants?")) {
         w := header(req, "x-peage-wallet")
         if has_prefix(w, "pw_") == false {
             res = srv_err("400 Bad Request", "input", "send X-Peage-Wallet: pw_... (mint one: POST " + tn_peage_url() + "/v1/wallets — see /llms.txt of peage)")
@@ -256,7 +274,7 @@ func srv_handle(req) (res) {
         res = srv_err("403 Forbidden", "read-only", "this is a follower; write to the primary")
         return
     }
-    if req.method == "POST" && req.path == "/shutdown" && role != "admin" {
+    if req.method == "POST" && (req.path == "/shutdown" || has_prefix(req.path, "/shutdown?")) && role != "admin" {
         res = srv_err("403 Forbidden", "auth", "admin only")
         return
     }
@@ -265,7 +283,7 @@ func srv_handle(req) (res) {
         return
     }
     if g_srv_follow == 1 { gr_refresh() }
-    if req.method == "POST" && req.path == "/put" {
+    if req.method == "POST" && (req.path == "/put" || has_prefix(req.path, "/put?")) {
         doc := srv_body_field(req, "doc")
         if valid_doc(doc) == 0 {
             res = srv_err("400 Bad Request", "input", "body must be {\"doc\":{...}} with minified JSON")
@@ -278,6 +296,10 @@ func srv_handle(req) (res) {
             return
         }
         ttl := parse_int(srv_body_field(req, "ttl_seconds"))
+        if g_cold == 1 && ttl > 0 {
+            res = srv_err("400 Bad Request", "input", "cold collections do not support TTL docs")
+            return
+        }
         if ttl > 0 {
             if charat(doc, 0) != "{" {
                 res = srv_err("400 Bad Request", "input", "ttl_seconds needs an object doc")
@@ -303,7 +325,7 @@ func srv_handle(req) (res) {
         res = srv_ok("{\"id\":\"" + jesc(id) + "\",\"doc\":" + doc + "}")
         return
     }
-    if req.method == "POST" && req.path == "/del" {
+    if req.method == "POST" && (req.path == "/del" || has_prefix(req.path, "/del?")) {
         id := srv_body_str(req, "id")
         if gr_del(id) == 0 {
             res = srv_err("404 Not Found", "not-found", "no document with id " + id)
@@ -443,7 +465,7 @@ func srv_handle(req) (res) {
         res = srv_ok(q_agg_full(f, query(req, "sum"), query(req, "minmax")))
         return
     }
-    if req.method == "POST" && req.path == "/index" {
+    if req.method == "POST" && (req.path == "/index" || has_prefix(req.path, "/index?")) {
         f := srv_body_str(req, "field")
         if len(f) == 0 {
             res = srv_err("400 Bad Request", "input", "body must be {\"field\":\"...\",\"sums\":\"a,b\"}")
@@ -456,7 +478,16 @@ func srv_handle(req) (res) {
         res = srv_ok("{\"field\":\"" + jesc(f) + "\",\"docs_indexed\":" + str(gr_count()) + "}")
         return
     }
-    if req.method == "POST" && req.path == "/compact" {
+    if req.method == "POST" && (req.path == "/cold" || has_prefix(req.path, "/cold?")) {
+        cok, cerr := gr_cold_enable()
+        if cok == 0 {
+            res = srv_err("400 Bad Request", "input", "cold enable failed: " + cerr)
+            return
+        }
+        res = srv_ok("{\"cold\":true,\"docs\":" + str(gr_count()) + "}")
+        return
+    }
+    if req.method == "POST" && (req.path == "/compact" || has_prefix(req.path, "/compact?")) {
         if gr_compact() == 0 {
             res = srv_err("500 Internal Server Error", "internal", "compaction failed; old files were NOT deleted")
             return
@@ -465,10 +496,14 @@ func srv_handle(req) (res) {
         return
     }
     if req.method == "GET" && has_prefix(req.path, "/stats") {
+        if g_cold == 1 {
+            res = srv_ok("{\"coll\":\"" + jesc(g_coll) + "\",\"cold\":true,\"docs_estimate\":" + str(cold_count_est()) + ",\"runs\":" + str(len(g_run_rid)) + ",\"gen\":" + str(g_gen) + "}")
+            return
+        }
         res = srv_ok("{\"coll\":\"" + jesc(g_coll) + "\",\"docs\":" + str(gr_count()) + ",\"gen\":" + str(g_gen) + ",\"chunks_replayed\":" + str(g_replayed_chunks) + ",\"indexes\":" + str(len(g_ifields)) + "}")
         return
     }
-    if req.method == "POST" && req.path == "/shutdown" {
+    if req.method == "POST" && (req.path == "/shutdown" || has_prefix(req.path, "/shutdown?")) {
         uok2, uerr2 := gr_use(g_srv_db, "_sys")
         if uok2 == 1 { tn_rl_flush()  gr_commit() }
         gr_commit()
@@ -508,6 +543,12 @@ func cmd_serve(fs) {
                 req := parse_request(raw)
                 req.remote = peer_addr(conn)
                 g_park = 0
+                // NOTE: an arena{}-wrapped read path would keep this loop's RSS flat,
+                // but gr_use stores request-derived strings into the registry deep in
+                // the call chain — ARENA001 v1 is intraprocedural and cannot prove
+                // that escape absent, so we do NOT wrap (a passing check here would
+                // be vacuous). The RSS watchdog + eviction bound memory instead.
+                // Upstream candidate: interprocedural ARENA001 provenance.
                 res := srv_handle(req)
                 if g_park > 0 {
                     since := parse_int(query(req, "since"))
@@ -523,5 +564,6 @@ func cmd_serve(fs) {
             }
         }
         watch_tick()
+        srv_rss_watchdog()
     }
 }

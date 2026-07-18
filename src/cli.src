@@ -108,6 +108,7 @@ func cmd_put(fs) {
         doc = "{\"_expires\":" + str(now_ms() + ttl * 1000) + "," + substr(doc, 1, len(doc))
     }
     do_open(fs)
+    if g_cold == 1 && ttl > 0 { emit_err(82, "input", "cold collections do not support TTL docs", 1, "omit --ttl or use a hot collection") }
     gr_put(id, doc)
     if gr_commit() == 0 { emit_err(111, "internal", "wal chunk write failed", 0, "check disk space and permissions") }
     emit_ok("{\"id\":\"" + jesc(id) + "\"}")
@@ -179,6 +180,10 @@ func cmd_compact(fs) {
 
 func cmd_stats(fs) {
     do_open(fs)
+    if g_cold == 1 {
+        emit_ok("{\"cold\":true,\"docs_estimate\":" + str(cold_count_est()) + ",\"runs\":" + str(len(g_run_rid)) + ",\"gen\":" + str(g_gen) + ",\"chunks_replayed\":" + str(g_replayed_chunks) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}")
+        return
+    }
     emit_ok("{\"docs\":" + str(gr_count()) + ",\"gen\":" + str(g_gen) + ",\"chunks_replayed\":" + str(g_replayed_chunks) + ",\"chunks_skipped\":" + str(g_skipped_chunks) + ",\"next_chunk\":" + str(g_next_chunk) + ",\"indexes\":" + str(len(g_ifields)) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}")
 }
 
@@ -248,6 +253,13 @@ func main() {
     if verb == "export" { do_open(fs)  emit_ok(q_find(flag_get(fs, "where"), 0))  return }
     if verb == "count" { cmd_count(fs)  return }
     if verb == "compact" { cmd_compact(fs)  return }
+    if verb == "cold" {
+        do_open(fs)
+        cok, cerr := gr_cold_enable()
+        if cok == 0 { emit_err(83, "input", "cold enable failed: " + cerr, 1, "see message") }
+        emit_ok("{\"cold\":true,\"runs\":" + str(len(g_run_rid)) + ",\"docs\":" + str(gr_count()) + "}")
+        return
+    }
     if verb == "index" { cmd_index(fs)  return }
     if verb == "indexes" { cmd_indexes(fs)  return }
     if verb == "agg" { cmd_agg(fs)  return }

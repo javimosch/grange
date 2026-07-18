@@ -104,6 +104,17 @@ gr_commit()                        // durable: one WAL chunk
 doc, found := gr_get("u1")
 ```
 
+## Cold storage (disk-resident collections)
+
+`grange cold --db d --coll archive` (or `POST /cold`) converts a collection to
+disk-resident: hash-partitioned page files (the same checksummed write-once
+format), a bounded memtable, and streaming scans. Measured at 200k docs: **4.4 MB
+RSS vs 89.9 MB hot** in a fresh process, point gets read exactly one page file
+per run (3 ms cold-start included), scans and compaction stream one page group
+at a time. Trade-offs, enforced: no secondary indexes or TTL docs on cold
+collections (aggregate scans still work), and gets go from ~µs to ~100 µs.
+Hot stays the default — cold is for data bigger than your RAM budget.
+
 ## Read replicas
 
 The immutable WAL doubles as a replication log, so replicas need no new

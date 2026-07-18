@@ -97,6 +97,7 @@ func gr_apply_lines(lines) (recs) {
             if i + 1 >= n { recs = -1  return }
             id := substr(ln, 2, len(ln))
             g_mem[id] = lines[i+1]
+            delete(g_tomb, id)
             gr_ttl_note(id, lines[i+1])
             i = i + 2
             recs = recs + 1
@@ -104,6 +105,7 @@ func gr_apply_lines(lines) (recs) {
             id := substr(ln, 2, len(ln))
             delete(g_mem, id)
             delete(g_ttl, id)
+            if g_cold == 1 { g_tomb[id] = 1 }
             i = i + 1
             recs = recs + 1
         } else {
@@ -163,11 +165,63 @@ func gr_open(db, coll) (ok, errmsg) {
     g_chg = []string{}
     g_skipped_chunks = 0
     g_replayed_chunks = 0
+    g_cold = 0
+    g_tomb = make(map[string]int)
+    g_run_rid = []int{}
+    g_run_pages = []int{}
+    g_run_count = []int{}
     mkdir(db)
     mkdir(gr_dir())
     entries := list_dir(gr_dir())
     if len(entries) == 0 {
         // brand-new collection (or unreadable dir; mkdir above covers create)
+        ix_load()
+        ix_clear()
+        g_cold = 0
+        g_tomb = make(map[string]int)
+        g_run_rid = []int{}
+        g_run_pages = []int{}
+        ok = 1
+        return
+    }
+    if len(read_file(gr_dir() + "/cold.flag")) > 0 {
+        g_cold = 1
+        g_tomb = make(map[string]int)
+        // cold generations live in cmeta names, not segment files
+        maxgen := 0
+        i := 0
+        while i < len(entries) {
+            e := entries[i]
+            if has_prefix(e, "crun-") && has_suffix(e, ".cmeta") {
+                gv := parse_int(substr(e, 5, 11))
+                if gv > maxgen { maxgen = gv }
+            }
+            i = i + 1
+        }
+        g_gen = maxgen
+        cold_load_runs()
+        pre := "wal-" + gr_pad6(g_gen) + "-"
+        chunks := []int{}
+        i = 0
+        while i < len(entries) {
+            e := entries[i]
+            if has_prefix(e, pre) && has_suffix(e, ".grg") {
+                chunks = append(chunks, parse_int(substr(e, len(pre), len(e)-4)))
+            }
+            i = i + 1
+        }
+        chunks = gr_sort_ints(chunks)
+        i = 0
+        while i < len(chunks) {
+            lines, nrecs, cok := gr_load_recfile(gr_dir() + "/" + pre + gr_pad6(chunks[i]) + ".grg")
+            if cok == 1 {
+                if gr_apply_lines(lines) >= 0 { g_replayed_chunks = g_replayed_chunks + 1 } else { g_skipped_chunks = g_skipped_chunks + 1 }
+            } else {
+                g_skipped_chunks = g_skipped_chunks + 1
+            }
+            if chunks[i] >= g_next_chunk { g_next_chunk = chunks[i] + 1 }
+            i = i + 1
+        }
         ix_load()
         ix_clear()
         ok = 1
@@ -261,6 +315,7 @@ func gr_put(id, doc) {
         ix_add(id, doc)
     }
     g_mem[id] = doc
+    delete(g_tomb, id)
     gr_ttl_note(id, doc)
     g_pend_ops = append(g_pend_ops, "put\t" + id)
     g_pend = append(g_pend, "p|" + id)
@@ -277,7 +332,11 @@ func gr_del(id) (existed) {
     if has(g_mem, id) {
         existed = 1
         if len(g_ifields) > 0 { ix_remove(id, g_mem[id]) }
+    } else if g_cold == 1 && has(g_tomb, id) == false {
+        d, f := cold_get(id)
+        if f == 1 { existed = 1 }
     }
+    if g_cold == 1 { g_tomb[id] = 1 }
     delete(g_mem, id)
     delete(g_ttl, id)
     g_pend_ops = append(g_pend_ops, "del\t" + id)
@@ -293,6 +352,9 @@ func gr_commit() (ok) {
     ok = gr_write_recfile(path, g_pend, g_pend_recs)
     if ok == 1 {
         g_next_chunk = g_next_chunk + 1
+        if g_cold == 1 && len(keys(g_mem)) + len(keys(g_tomb)) >= cold_threshold() {
+            cold_flush()
+        }
         // change feed: one seq per committed record, ring capped at ~400
         i := 0
         while i < len(g_pend_ops) {
@@ -316,6 +378,10 @@ func gr_commit() (ok) {
 func gr_get(id) (doc, found) {
     doc = ""
     found = 0
+    if g_cold == 1 {
+        doc, found = cold_get(id)
+        return
+    }
     if has(g_mem, id) {
         if has(g_ttl, id) && g_ttl[id] <= now_ms() {
             gr_del(id)
@@ -328,6 +394,10 @@ func gr_get(id) (doc, found) {
 }
 
 func gr_count() (n) {
+    if g_cold == 1 {
+        n = cold_count_all()
+        return
+    }
     n = len(keys(g_mem))
 }
 
@@ -336,6 +406,10 @@ func gr_count() (n) {
 func gr_compact() (ok) {
     ok = 0
     if gr_commit() == 0 { return }
+    if g_cold == 1 {
+        ok = cold_compact()
+        return
+    }
     newgen := g_gen + 1
     ids := keys(g_mem)
     lines := []string{}
@@ -385,7 +459,13 @@ var R_rdirty = make(map[string]map[string]int)
 var R_ttl = make(map[string]map[string]int)
 var R_seq = make(map[string]int)
 var R_seqbase = make(map[string]int)
+var g_touch = make(map[string]int)
 var R_chg = make(map[string][]string)
+var R_cold = make(map[string]int)
+var R_tomb = make(map[string]map[string]int)
+var R_runrid = make(map[string][]int)
+var R_runpages = make(map[string][]int)
+var R_runcount = make(map[string][]int)
 
 func gr_key(db, coll) (k) {
     k = db + "\t" + coll
@@ -411,14 +491,70 @@ func gr_park() {
     R_seq[k] = g_seq
     R_seqbase[k] = g_seq_base
     R_chg[k] = g_chg
+    R_cold[k] = g_cold
+    R_tomb[k] = g_tomb
+    R_runrid[k] = g_run_rid
+    R_runpages[k] = g_run_pages
+    R_runcount[k] = g_run_count
 }
 
 // gr_use switches the active collection, loading it from disk the first time.
 // Staged-but-uncommitted writes are committed before parking (the server
 // commits per request anyway; this keeps the invariant under any caller).
+// gr_evict drops the least-recently-used loaded collections beyond
+// GRANGE_MAX_LOADED (default 24). Freed map nodes return to the OS at the
+// next watchdog restart (arena bytes don't free mid-process) — eviction's
+// real job is bounding what reloads after one.
+func gr_evict() {
+    maxn := parse_int(env("GRANGE_MAX_LOADED"))
+    if maxn == 0 { maxn = 24 }
+    loaded := keys(R_loaded)
+    if len(loaded) <= maxn { return }
+    cur := gr_key(g_db, g_coll)
+    oldest := ""
+    oldms := 0
+    i := 0
+    while i < len(loaded) {
+        k := loaded[i]
+        if k != cur && has_suffix(k, "\t_sys") == false {
+            if len(oldest) == 0 || g_touch[k] < oldms {
+                oldest = k
+                oldms = g_touch[k]
+            }
+        }
+        i = i + 1
+    }
+    if len(oldest) == 0 { return }
+    delete(R_loaded, oldest)
+    delete(R_mem, oldest)
+    delete(R_gen, oldest)
+    delete(R_next, oldest)
+    delete(R_ifields, oldest)
+    delete(R_isums, oldest)
+    delete(R_ikind, oldest)
+    delete(R_buckets, oldest)
+    delete(R_bcount, oldest)
+    delete(R_breg, oldest)
+    delete(R_rvals, oldest)
+    delete(R_rids, oldest)
+    delete(R_rdirty, oldest)
+    delete(R_ttl, oldest)
+    delete(R_seq, oldest)
+    delete(R_seqbase, oldest)
+    delete(R_chg, oldest)
+    delete(R_cold, oldest)
+    delete(R_tomb, oldest)
+    delete(R_runrid, oldest)
+    delete(R_runpages, oldest)
+    delete(R_runcount, oldest)
+    delete(g_touch, oldest)
+    write(2, "{\"event\":\"evicted\",\"key\":\"" + oldest + "\",\"loaded\":" + str(len(keys(R_loaded))) + "}\n")
+}
+
 func gr_use(db, coll) (ok, errmsg) {
     ok = 1
     errmsg = ""
+    g_touch[gr_key(db, coll)] = now_ms()
     if g_db == db && g_coll == coll { return }
     if g_pend_recs > 0 { gr_commit() }
     gr_park()
@@ -444,11 +580,19 @@ func gr_use(db, coll) (ok, errmsg) {
         g_seq = R_seq[k]
         g_seq_base = R_seqbase[k]
         g_chg = R_chg[k]
+        g_cold = R_cold[k]
+        g_tomb = R_tomb[k]
+        g_run_rid = R_runrid[k]
+        g_run_pages = R_runpages[k]
+        g_run_count = R_runcount[k]
         g_pend_ops = []string{}
         return
     }
     ok, errmsg = gr_open(db, coll)
-    if ok == 1 { gr_park() }
+    if ok == 1 {
+        gr_park()
+        gr_evict()
+    }
 }
 
 // ---- read-replica support (M12) ----

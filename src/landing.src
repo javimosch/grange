@@ -33,6 +33,7 @@ func llms_txt() (t) {
         "DBS     curl -s $G/dbs -H \"$A\"                                              # tenants have MULTIPLE databases: pass db= on any call (default 'default')\n" +
         "STATS   curl -s \"$G/stats?coll=leads\" -H \"$A\"\n" +
         "COMPACT curl -s -X POST $G/compact -H \"$A\" -d '{\"coll\":\"leads\"}'             # fold WAL chunks; run when stats.chunks_replayed grows\n" +
+        "COLD    curl -s -X POST \"$G/cold?coll=archive\" -H \"$A\"                          # DISK-RESIDENT mode: RAM stays ~flat regardless of size (20x less at 200k docs); point gets read one page file; scans stream; no secondary indexes/TTL on cold; irreversible per collection\n" +
         "WATCH   curl -s \"$G/watch?coll=jobs&since=0&timeout=25\" -H \"$A\"       # LONG-POLL: blocks until the collection changes past since -> {seq,changes:[{seq,op,id}]}; poll again with the returned seq\n" +
         "EXPORT  curl -s \"$G/export?coll=leads&format=lines\" -H \"$A\"              # NDJSON 'id<TAB>doc' lines — pipe straight into /bulk of another grange\n" +
         "USAGE   curl -s $G/usage -H \"$A\"\n" +
