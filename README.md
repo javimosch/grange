@@ -60,10 +60,16 @@ curl -X POST :4444/put -H "Authorization: Bearer $T" -d '{"doc":{"status":"activ
 curl ":4444/find?where=score>=5" -H "Authorization: Bearer $T"    # /get /del /count /agg /index /stats /compact /health
 ```
 
-The server is **single-actor by construction**: a sequential accept loop with
+The server is **multi-collection** (`?coll=` / body `"coll"`, `GET /collections`
+lists them) and **single-actor by construction**: a sequential accept loop with
 zero goroutines, so there is nothing to race on — and machin's inferred
 data-race analysis (`machin check`, no annotations) verifies that on every
-build. Concurrent-reader serving is deliberately future work.
+build. Collection switching is O(1): MFL maps are reference types, so parking
+and restoring a collection's whole state is a handful of map assignments.
+Concurrent-reader serving is deliberately future work.
+
+A hosted instance runs at **https://grange.intrane.fr** (bearer-token gated;
+`/health` is open — the seed of the managed offering).
 
 Embedded, from any machin app:
 
@@ -82,14 +88,14 @@ doc, found := gr_get("u1")
 
 ```sh
 make build    # needs machin >= 0.108
-make verify   # check + tests (58) + 100k bench + crash harness
+make verify   # check + tests (65) + 100k bench + crash harness
 ```
 
-## Scope & honesty (M3)
+## Scope & honesty (M4)
 
 - Whole dataset + indexes live in memory (memtable = the db); segments make cold open fast, not memory small. Steady-state RSS at 100k docs + 1 index is ~120 MB (fresh process); the bench process peaks at ~440 MB from MFL arena temporaries — a memory diet is the standing target.
 - `--where` supports equality + numeric ranges. Equality clauses use buckets; a single range clause on a `--range` field uses the sorted projection (built lazily on the first range query after a write — the build cost is the first query's, honestly). Multi-clause range queries scan. Aggregate registers cover count/sum/avg; `--minmax` computes min/max on the scan path.
 - Durability is process-crash-exact (proven by `make crash`), OS-crash best-effort (no fsync builtin in MFL yet).
-- `grange serve` handles one request at a time (correctness first); one server per collection. Concurrent readers, multi-collection serving, and range indexes are next.
+- `grange serve` handles one request at a time (correctness first) across any number of collections. Concurrent readers and metered multi-tenant hosting are next.
 
 MIT.

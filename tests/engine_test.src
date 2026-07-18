@@ -163,6 +163,29 @@ func main() {
     rv, rerr = json_get(rjson, ".count")
     assert_eq_str(rv, "5", "range works after reopen")
 
+    // ---- M4: multi-collection registry (gr_use) ----
+    ok, errmsg = gr_use(db, "c1")
+    gr_put("a", "{\"v\":1}")
+    gr_commit()
+    gr_index_add("v", "", "")
+    ok, errmsg = gr_use(db, "c2")
+    assert_eq_int(gr_count(), 0, "use: fresh collection empty")
+    gr_put("b", "{\"v\":2}")
+    gr_put("c", "{\"v\":3}")
+    gr_commit()
+    ok, errmsg = gr_use(db, "c1")
+    assert_eq_int(gr_count(), 1, "use: back to c1, state parked+restored")
+    assert_eq_int(len(g_ifields), 1, "use: c1 index survives switch")
+    assert_eq_int(g_bcount["v\t1"], 1, "use: c1 buckets survive switch")
+    ok, errmsg = gr_use(db, "c2")
+    assert_eq_int(gr_count(), 2, "use: c2 restored")
+    assert_eq_int(len(g_ifields), 0, "use: c2 has no indexes")
+    // uncommitted staged writes are committed on switch
+    gr_put("d", "{\"v\":4}")
+    ok, errmsg = gr_use(db, "c1")
+    ok, errmsg = gr_open(db, "c2")
+    assert_eq_int(gr_count(), 3, "use: pending write committed before park")
+
     // ix_fstr precision (the %g bug): big integral sums print exactly
     assert_eq_str(ix_fstr(16649667.0), "16649667", "fstr big int exact")
     assert_eq_str(ix_fstr(499.5), "499.5", "fstr fraction")

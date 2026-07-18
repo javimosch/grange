@@ -72,7 +72,9 @@ func gr_load_recfile(path) (lines, nrecs, ok) {
         lines = append(lines, raw[i])
         i = i + 1
     }
-    body := join(lines, "\n")
+    // body is content minus "\n<trailer>\n" — substr beats re-joining the lines
+    body := ""
+    if m > 1 { body = substr(content, 0, len(content) - len(trailer) - 2) }
     if gr_chk(body) != parts[2] { return }
     nrecs = want_recs
     ok = 1
@@ -293,4 +295,77 @@ func gr_compact() (ok) {
     g_gen = newgen
     g_next_chunk = 0
     ok = 1
+}
+
+// ---- multi-collection registry (M4) ----
+// Maps are reference types, so parking a collection's state and restoring it
+// later is O(1) — the single-actor server switches collections per request.
+
+var R_loaded = make(map[string]int)
+var R_mem = make(map[string]map[string]string)
+var R_gen = make(map[string]int)
+var R_next = make(map[string]int)
+var R_ifields = make(map[string][]string)
+var R_isums = make(map[string]map[string]string)
+var R_ikind = make(map[string]map[string]string)
+var R_buckets = make(map[string]map[string][]string)
+var R_bcount = make(map[string]map[string]int)
+var R_breg = make(map[string]map[string]float)
+var R_rvals = make(map[string]map[string][]float)
+var R_rids = make(map[string]map[string][]string)
+var R_rdirty = make(map[string]map[string]int)
+
+func gr_key(db, coll) (k) {
+    k = db + "\t" + coll
+}
+
+func gr_park() {
+    if len(g_db) == 0 { return }
+    k := gr_key(g_db, g_coll)
+    R_loaded[k] = 1
+    R_mem[k] = g_mem
+    R_gen[k] = g_gen
+    R_next[k] = g_next_chunk
+    R_ifields[k] = g_ifields
+    R_isums[k] = g_isums
+    R_ikind[k] = g_ikind
+    R_buckets[k] = g_buckets
+    R_bcount[k] = g_bcount
+    R_breg[k] = g_breg
+    R_rvals[k] = g_rvals
+    R_rids[k] = g_rids
+    R_rdirty[k] = g_rdirty
+}
+
+// gr_use switches the active collection, loading it from disk the first time.
+// Staged-but-uncommitted writes are committed before parking (the server
+// commits per request anyway; this keeps the invariant under any caller).
+func gr_use(db, coll) (ok, errmsg) {
+    ok = 1
+    errmsg = ""
+    if g_db == db && g_coll == coll { return }
+    if g_pend_recs > 0 { gr_commit() }
+    gr_park()
+    k := gr_key(db, coll)
+    if R_loaded[k] == 1 {
+        g_db = db
+        g_coll = coll
+        g_mem = R_mem[k]
+        g_gen = R_gen[k]
+        g_next_chunk = R_next[k]
+        g_pend = []string{}
+        g_pend_recs = 0
+        g_ifields = R_ifields[k]
+        g_isums = R_isums[k]
+        g_ikind = R_ikind[k]
+        g_buckets = R_buckets[k]
+        g_bcount = R_bcount[k]
+        g_breg = R_breg[k]
+        g_rvals = R_rvals[k]
+        g_rids = R_rids[k]
+        g_rdirty = R_rdirty[k]
+        return
+    }
+    ok, errmsg = gr_open(db, coll)
+    if ok == 1 { gr_park() }
 }
