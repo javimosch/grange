@@ -7,7 +7,8 @@ func llms_txt() (t) {
         "grange is an agent-first document DB: one static binary (MFL/machin), crash-safe\n" +
         "WAL, secondary indexes with O(1) count/sum/avg registers, sorted range indexes.\n" +
         "Faster than SQLite on every indexed workload at 100k docs (see the README bench).\n" +
-        "OSS: https://github.com/javimosch/grange  ·  This hosted instance: https://grange.intrane.fr\n\n" +
+        "OSS: https://github.com/javimosch/grange  ·  This hosted instance: https://grange.intrane.fr\n" +
+        "READ REPLICA: https://read.grange.intrane.fr — same tokens, GET routes only (find/count/agg/get/watch/export); point read-heavy agents here, writes go to the primary\n\n" +
         "## Get a namespace (self-serve; a peage wallet is the only credential)\n\n" +
         "1. mint a wallet:  curl -s -X POST https://peage.intrane.fr/v1/wallets -d '{}'    (save the pw_ token; docs: https://peage.intrane.fr/llms.txt)\n" +
         "2. fund it:        curl -s -X POST https://peage.intrane.fr/v1/topup -H 'Authorization: Bearer pw_...' -d '{\"amount_cents\":500}'   -> a Stripe URL your human pays once\n" +

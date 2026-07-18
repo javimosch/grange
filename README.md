@@ -70,7 +70,9 @@ Concurrent-reader serving is deliberately future work.
 
 ## Hosted: grange.intrane.fr
 
-A managed instance runs at **https://grange.intrane.fr**. Signup is self-serve
+A managed instance runs at **https://grange.intrane.fr**, with a read replica
+at **https://read.grange.intrane.fr** (same tokens, GET routes; writes 403 and
+belong on the primary). Signup is self-serve
 and agent-first — a [peage](https://peage.intrane.fr) wallet is the only
 credential:
 
