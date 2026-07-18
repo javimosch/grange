@@ -236,6 +236,14 @@ func joinLines(lines []string) string {
 	return out
 }
 
+// Watch long-polls until the collection changes past since (or timeout seconds).
+// Returns {"seq":..,"resync":..,"changes":[{seq,op,id}]} as raw JSON.
+func (c *Client) Watch(since, timeoutSec int) (json.RawMessage, error) {
+	var out json.RawMessage
+	err := c.do("GET", fmt.Sprintf("/watch?%s&since=%d&timeout=%d", c.qs(), since, timeoutSec), nil, &out)
+	return out, err
+}
+
 // Usage returns the tenant's storage/billing view as raw JSON.
 func (c *Client) Usage() (json.RawMessage, error) {
 	var out json.RawMessage

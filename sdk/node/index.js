@@ -110,6 +110,12 @@ class Grange {
     return env.data;
   }
 
+  // Long-poll: resolves when the collection changes past `since` (or timeout).
+  // -> { seq, resync, changes: [{seq, op, id}] }
+  async watch(since = 0, { timeout = 25 } = {}) {
+    return this._req('GET', `/watch?${this._qs}&since=${since}&timeout=${timeout}`);
+  }
+
   async collections() { return (await this._req('GET', `/collections?db=${encodeURIComponent(this._db)}`)).collections; }
   async dbs() { return (await this._req('GET', '/dbs')).dbs; }
   async usage() { return this._req('GET', '/usage'); }

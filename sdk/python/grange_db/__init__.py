@@ -19,7 +19,7 @@ import urllib.parse as _up
 import urllib.error as _er
 
 __all__ = ["Grange", "GrangeError", "signup"]
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 
 class GrangeError(Exception):
@@ -119,6 +119,16 @@ class Grange:
         """Raw bulk lines: '{...}' put auto-id · 'id\\t{...}' put · '-\\tid' del.
         All-or-nothing, one WAL commit."""
         return self._req("POST", f"/bulk?{self._qs}", raw_body="\n".join(lines), ctype="text/plain")
+
+    def watch(self, since=0, timeout=25):
+        """Long-poll: blocks server-side until this collection changes past
+        `since` (or timeout). -> {seq, resync, changes:[{seq,op,id}]}"""
+        old = self.timeout
+        self.timeout = timeout + 10
+        try:
+            return self._req("GET", f"/watch?{self._qs}&since={since}&timeout={timeout}")
+        finally:
+            self.timeout = old
 
     def export(self, where=""):
         return self._req("GET", f"/export?{self._qs}&where={_up.quote(where)}")

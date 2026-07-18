@@ -12,6 +12,13 @@
 
 var g_srv_token = ""
 var g_srv_db = ""
+// parked long-poll watchers (single-actor: plain parallel slices, no locks)
+var g_w_fd = []int{}
+var g_w_db = []string{}
+var g_w_coll = []string{}
+var g_w_since = []int{}
+var g_w_deadline = []int{}
+var g_park = 0
 
 func srv_json(status, body) (res) {
     res = response(status, "application/json", body)
@@ -64,6 +71,74 @@ func srv_use(req, root) (ok) {
     if c == "_sys" { return }
     uok, uerr := gr_use(root, c)
     ok = uok
+}
+
+// watch_payload renders changes after `since` for the CURRENT collection.
+func watch_payload(since) (data) {
+    items := []string{}
+    resync := 0
+    if since > g_seq { resync = 1 }
+    floor := g_seq - len(g_chg)
+    if since < floor { resync = 1 }
+    if resync == 0 {
+        i := 0
+        while i < len(g_chg) {
+            sv, serr := json_get(g_chg[i], ".seq")
+            if len(serr) == 0 && parse_int(sv) > since { items = append(items, g_chg[i]) }
+            i = i + 1
+        }
+    }
+    data = "{\"seq\":" + str(g_seq) + ",\"resync\":" + str(resync) + ",\"changes\":[" + join(items, ",") + "]}"
+}
+
+// srv_write_res writes a Response to fd and closes it (our own loop's writer).
+func srv_write_res(fd, res) {
+    out := "HTTP/1.1 " + res.status + "\r\nContent-Type: " + res.ctype + "\r\nContent-Length: " + str(len(res.body)) + "\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n" + res.body
+    write(fd, out)
+    close(fd)
+}
+
+// watch_park stashes the current connection until news or deadline.
+func watch_park(fd, since, timeout_s) {
+    g_w_fd = append(g_w_fd, fd)
+    g_w_db = append(g_w_db, g_db)
+    g_w_coll = append(g_w_coll, g_coll)
+    g_w_since = append(g_w_since, since)
+    g_w_deadline = append(g_w_deadline, now_ms() + timeout_s * 1000)
+}
+
+// watch_tick wakes parked watchers whose collection advanced or deadline hit.
+func watch_tick() {
+    if len(g_w_fd) == 0 { return }
+    nowms := now_ms()
+    kfd := []int{}
+    kdb := []string{}
+    kcoll := []string{}
+    ksince := []int{}
+    kdl := []int{}
+    i := 0
+    while i < len(g_w_fd) {
+        uok, uerr := gr_use(g_w_db[i], g_w_coll[i])
+        fire := 0
+        if uok == 0 { fire = 1 }
+        if g_seq > g_w_since[i] { fire = 1 }
+        if nowms >= g_w_deadline[i] { fire = 1 }
+        if fire == 1 {
+            srv_write_res(g_w_fd[i], srv_ok(watch_payload(g_w_since[i])))
+        } else {
+            kfd = append(kfd, g_w_fd[i])
+            kdb = append(kdb, g_w_db[i])
+            kcoll = append(kcoll, g_w_coll[i])
+            ksince = append(ksince, g_w_since[i])
+            kdl = append(kdl, g_w_deadline[i])
+        }
+        i = i + 1
+    }
+    g_w_fd = kfd
+    g_w_db = kdb
+    g_w_coll = kcoll
+    g_w_since = ksince
+    g_w_deadline = kdl
 }
 
 func srv_handle(req) (res) {
@@ -281,6 +356,24 @@ func srv_handle(req) (res) {
         res = srv_ok("{\"ops\":" + str(nops) + ",\"ids\":[" + join(ids, ",") + "]}")
         return
     }
+    // long-poll: block (parked socket) until this collection changes past ?since=
+    if req.method == "GET" && has_prefix(req.path, "/watch") {
+        since := parse_int(query(req, "since"))
+        tmo := parse_int(query(req, "timeout"))
+        if tmo < 1 { tmo = 25 }
+        if tmo > 55 { tmo = 55 }
+        if g_seq > since || since > g_seq {
+            res = srv_ok(watch_payload(since))
+            return
+        }
+        if len(g_w_fd) >= 100 {
+            res = srv_err("503 Service Unavailable", "capacity", "too many parked watchers")
+            return
+        }
+        g_park = tmo
+        res = srv_ok("")
+        return
+    }
     if req.method == "GET" && has_prefix(req.path, "/export") {
         res = srv_ok(q_find(query(req, "where"), 0))
         return
@@ -346,8 +439,29 @@ func cmd_serve(fs) {
     println("{\"event\":\"listening\",\"port\":" + str(port) + ",\"db\":\"" + jesc(flag_get(fs, "db")) + "\",\"coll\":\"" + jesc(flag_get(fs, "coll")) + "\",\"docs\":" + str(gr_count()) + ",\"token\":\"" + g_srv_token + "\"}")
     flush()
     server := listen(port)
+    socket_timeout(server, 250)
     for {
         conn := accept(server)
-        machweb_handle(conn, func(req) { return srv_handle(req) })
+        if conn >= 0 {
+            started := now_ms()
+            socket_timeout(conn, 5000)
+            raw := read_request(conn)
+            if len(raw) == 0 {
+                close(conn)
+            } else {
+                req := parse_request(raw)
+                req.remote = peer_addr(conn)
+                g_park = 0
+                res := srv_handle(req)
+                if g_park > 0 {
+                    since := parse_int(query(req, "since"))
+                    watch_park(conn, since, g_park)
+                } else {
+                    srv_write_res(conn, res)
+                    access_log(req, res.status, len(res.body), now_ms() - started)
+                }
+            }
+        }
+        watch_tick()
     }
 }

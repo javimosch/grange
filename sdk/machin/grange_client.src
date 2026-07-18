@@ -117,3 +117,10 @@ func grange_bulk(g, lines) (nops) {
     d, derr := json_get(resp, ".data.ops")
     if len(derr) == 0 { nops = parse_int(d) }
 }
+
+// grange_watch long-polls until the collection changes past since (or timeout
+// seconds). Returns the raw data JSON {"seq":..,"resync":..,"changes":[...]}.
+func grange_watch(g, since, timeout_s) (data) {
+    status, resp := grange_req(g, "GET", "/watch?" + grange_qs(g) + "&since=" + str(since) + "&timeout=" + str(timeout_s), "")
+    data = grange_data(status, resp)
+}

@@ -27,6 +27,9 @@ var g_pend_recs = 0
 var g_skipped_chunks = 0
 var g_replayed_chunks = 0
 var g_ttl = make(map[string]int)
+var g_seq = 0
+var g_chg = []string{}
+var g_pend_ops = []string{}
 
 func gr_dir() (p) {
     p = g_db + "/" + g_coll
@@ -150,6 +153,9 @@ func gr_open(db, coll) (ok, errmsg) {
     g_next_chunk = 0
     g_pend = []string{}
     g_pend_recs = 0
+    g_pend_ops = []string{}
+    g_seq = 0
+    g_chg = []string{}
     g_skipped_chunks = 0
     g_replayed_chunks = 0
     mkdir(db)
@@ -251,6 +257,7 @@ func gr_put(id, doc) {
     }
     g_mem[id] = doc
     gr_ttl_note(id, doc)
+    g_pend_ops = append(g_pend_ops, "put\t" + id)
     g_pend = append(g_pend, "p|" + id)
     g_pend = append(g_pend, doc)
     g_pend_recs = g_pend_recs + 1
@@ -268,6 +275,7 @@ func gr_del(id) (existed) {
     }
     delete(g_mem, id)
     delete(g_ttl, id)
+    g_pend_ops = append(g_pend_ops, "del\t" + id)
     g_pend = append(g_pend, tomb)
     g_pend_recs = g_pend_recs + 1
 }
@@ -280,8 +288,23 @@ func gr_commit() (ok) {
     ok = gr_write_recfile(path, g_pend, g_pend_recs)
     if ok == 1 {
         g_next_chunk = g_next_chunk + 1
+        // change feed: one seq per committed record, ring capped at ~400
+        i := 0
+        while i < len(g_pend_ops) {
+            tabp := index(g_pend_ops[i], "\t")
+            g_seq = g_seq + 1
+            g_chg = append(g_chg, "{\"seq\":" + str(g_seq) + ",\"op\":\"" + substr(g_pend_ops[i], 0, tabp) + "\",\"id\":\"" + substr(g_pend_ops[i], tabp + 1, len(g_pend_ops[i])) + "\"}")
+            i = i + 1
+        }
+        if len(g_chg) > 400 {
+            nw := []string{}
+            i = len(g_chg) - 200
+            while i < len(g_chg) { nw = append(nw, g_chg[i])  i = i + 1 }
+            g_chg = nw
+        }
         g_pend = []string{}
         g_pend_recs = 0
+        g_pend_ops = []string{}
     }
 }
 
@@ -355,6 +378,8 @@ var R_rvals = make(map[string]map[string][]float)
 var R_rids = make(map[string]map[string][]string)
 var R_rdirty = make(map[string]map[string]int)
 var R_ttl = make(map[string]map[string]int)
+var R_seq = make(map[string]int)
+var R_chg = make(map[string][]string)
 
 func gr_key(db, coll) (k) {
     k = db + "\t" + coll
@@ -377,6 +402,8 @@ func gr_park() {
     R_rids[k] = g_rids
     R_rdirty[k] = g_rdirty
     R_ttl[k] = g_ttl
+    R_seq[k] = g_seq
+    R_chg[k] = g_chg
 }
 
 // gr_use switches the active collection, loading it from disk the first time.
@@ -407,6 +434,9 @@ func gr_use(db, coll) (ok, errmsg) {
         g_rids = R_rids[k]
         g_rdirty = R_rdirty[k]
         g_ttl = R_ttl[k]
+        g_seq = R_seq[k]
+        g_chg = R_chg[k]
+        g_pend_ops = []string{}
         return
     }
     ok, errmsg = gr_open(db, coll)

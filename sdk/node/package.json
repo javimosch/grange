@@ -1,6 +1,6 @@
 {
   "name": "grange-db",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Client for the grange document database — agent-first, crash-safe, pay-as-you-go hosted at grange.intrane.fr",
   "main": "index.js",
   "license": "MIT",
