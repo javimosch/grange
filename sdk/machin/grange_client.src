@@ -1,0 +1,107 @@
+// grange client SDK for machin (MFL) — a thin typed wrapper over the hosted
+// HTTP/JSON API (https://grange.intrane.fr/llms.txt) or any `grange serve`.
+//
+// Compose ahead of your app:
+//   machin encode sdk/machin/grange_client.src yourapp.src > app.mfl
+//
+//   g := grange_client("https://grange.intrane.fr", "gt_...")
+//   g = grange_use(g, "mydb", "leads")               // db + collection
+//   id, ok := grange_put(g, "", "{\"co\":\"acme\",\"score\":9}")   // "" id = auto
+//   doc, found := grange_get(g, id)
+//   rows := grange_find(g, "score>=5", 50)            // raw data JSON
+//   n := grange_count(g, "co=acme")
+
+type Grange struct { base string  token string  db string  coll string }
+
+func grange_client(base, token) (g) {
+    g = Grange{base: base, token: token, db: "default", coll: "default"}
+}
+
+func grange_use(g, db, coll) (out) {
+    out = g
+    out.db = db
+    out.coll = coll
+}
+
+func grange_qs(g) (qs) {
+    qs = "coll=" + url_encode(g.coll) + "&db=" + url_encode(g.db)
+}
+
+func grange_req(g, method, path, body) (status, resp) {
+    status, resp, herr := http_request(method, g.base + path, []string{"content-type: application/json", "authorization: Bearer " + g.token}, body)
+    if len(herr) > 0 { status = 0  resp = "{\"ok\":false,\"error\":{\"type\":\"network\",\"message\":\"" + herr + "\"}}" }
+}
+
+// grange_data extracts .data from an envelope ("" if the call failed).
+func grange_data(status, resp) (data) {
+    data = ""
+    if status != 200 { return }
+    v, err := json_get(resp, ".data")
+    if len(err) == 0 { data = v }
+}
+
+func grange_put(g, id, doc) (out_id, ok) {
+    out_id = ""
+    ok = 0
+    idpart := ""
+    if len(id) > 0 { idpart = "\"id\":\"" + id + "\"," }
+    status, resp := grange_req(g, "POST", "/put", "{" + idpart + "\"db\":\"" + g.db + "\",\"coll\":\"" + g.coll + "\",\"doc\":" + doc + "}")
+    d := grange_data(status, resp)
+    if len(d) == 0 { return }
+    v, err := json_get(d, ".id")
+    if len(err) > 0 { return }
+    out_id = v
+    if len(out_id) > 1 { out_id = substr(out_id, 1, len(out_id) - 1) }
+    ok = 1
+}
+
+func grange_get(g, id) (doc, found) {
+    doc = ""
+    found = 0
+    status, resp := grange_req(g, "GET", "/get?" + grange_qs(g) + "&id=" + url_encode(id), "")
+    d := grange_data(status, resp)
+    if len(d) == 0 { return }
+    v, err := json_get(d, ".doc")
+    if len(err) > 0 { return }
+    doc = v
+    found = 1
+}
+
+func grange_del(g, id) (ok) {
+    ok = 0
+    status, resp := grange_req(g, "POST", "/del", "{\"id\":\"" + id + "\",\"db\":\"" + g.db + "\",\"coll\":\"" + g.coll + "\"}")
+    if status == 200 { ok = 1 }
+}
+
+// grange_find returns the raw data JSON: {"count":N,"mode":"...","items":[{id,doc}...]}
+func grange_find(g, where, limit) (data) {
+    status, resp := grange_req(g, "GET", "/find?" + grange_qs(g) + "&where=" + url_encode(where) + "&limit=" + str(limit), "")
+    data = grange_data(status, resp)
+}
+
+func grange_count(g, where) (n) {
+    n = -1
+    status, resp := grange_req(g, "GET", "/count?" + grange_qs(g) + "&where=" + url_encode(where), "")
+    d := grange_data(status, resp)
+    if len(d) == 0 { return }
+    v, err := json_get(d, ".count")
+    if len(err) == 0 { n = parse_int(v) }
+}
+
+// grange_agg returns the raw data JSON: {"group_by":...,"groups":[...]}
+func grange_agg(g, groupby, sum) (data) {
+    status, resp := grange_req(g, "GET", "/agg?" + grange_qs(g) + "&group-by=" + url_encode(groupby) + "&sum=" + url_encode(sum), "")
+    data = grange_data(status, resp)
+}
+
+// kind: "" (equality buckets + sum registers) or "range" (sorted projection)
+func grange_index(g, field, sums, kind) (ok) {
+    ok = 0
+    status, resp := grange_req(g, "POST", "/index", "{\"db\":\"" + g.db + "\",\"coll\":\"" + g.coll + "\",\"field\":\"" + field + "\",\"sums\":\"" + sums + "\",\"kind\":\"" + kind + "\"}")
+    if status == 200 { ok = 1 }
+}
+
+func grange_usage(g) (data) {
+    status, resp := grange_req(g, "GET", "/usage", "")
+    data = grange_data(status, resp)
+}

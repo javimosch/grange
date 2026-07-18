@@ -100,8 +100,31 @@ func srv_handle(req) (res) {
         return
     }
     tn_sweep()
+    // tenants get a two-level namespace: db (?db=, default "default") / collection
     root := g_srv_db
-    if role == "tenant" { root = tn_root(tid) }
+    if role == "tenant" {
+        dbname := query(req, "db")
+        if len(dbname) == 0 { dbname = srv_body_str(req, "db") }
+        if len(dbname) == 0 { dbname = "default" }
+        if valid_id(dbname) == 0 || contains(dbname, ".") {
+            res = srv_err("400 Bad Request", "input", "bad db name")
+            return
+        }
+        root = tn_root(tid) + "/" + dbname
+    }
+    if role == "tenant" && req.method == "GET" && has_prefix(req.path, "/dbs") {
+        entries := list_dir(tn_root(tid))
+        items := []string{}
+        i := 0
+        while i < len(entries) {
+            if contains(entries[i], ".") == false {
+                items = append(items, "\"" + jesc(entries[i]) + "\"")
+            }
+            i = i + 1
+        }
+        res = srv_ok("{\"dbs\":[" + join(items, ",") + "]}")
+        return
+    }
     if req.method == "GET" && has_prefix(req.path, "/usage") {
         utid := tid
         if role == "admin" { utid = query(req, "tenant") }

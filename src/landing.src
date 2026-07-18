@@ -26,11 +26,13 @@ func llms_txt() (t) {
         "INDEX   curl -s -X POST $G/index -H \"$A\" -d '{\"coll\":\"leads\",\"field\":\"co\",\"sums\":\"score\"}'   # kind:\"range\" for > < >= <=\n" +
         "AGG     curl -s \"$G/agg?coll=leads&group-by=co&sum=score\" -H \"$A\"             # count/sum/avg O(1) via registers; minmax= scans\n" +
         "COLLS   curl -s $G/collections -H \"$A\"\n" +
+        "DBS     curl -s $G/dbs -H \"$A\"                                              # tenants have MULTIPLE databases: pass db= on any call (default 'default')\n" +
         "STATS   curl -s \"$G/stats?coll=leads\" -H \"$A\"\n" +
         "COMPACT curl -s -X POST $G/compact -H \"$A\" -d '{\"coll\":\"leads\"}'             # fold WAL chunks; run when stats.chunks_replayed grows\n" +
         "USAGE   curl -s $G/usage -H \"$A\"\n" +
         "HEALTH  curl -s $G/health                                                      # open, no auth\n\n" +
         "Docs are single-line minified JSON. Errors: {\"ok\":false,\"error\":{type,message}} with proper HTTP codes.\n" +
+        "SDKs: Node.js `npm i grange-db` · Go `go get github.com/javimosch/grange/sdk/go` · machin: compose sdk/machin/grange_client.src — https://github.com/javimosch/grange/tree/main/sdk\n" +
         "Durability: every write request is one immutable checksummed WAL chunk (process-crash-exact).\n" +
         "Your data is exportable at any time (find with a high limit, per collection) and the engine is OSS —\n" +
         "self-host the same binary if you outgrow the hosted rail.\n"

@@ -1,0 +1,10 @@
+{
+  "name": "grange-db",
+  "version": "0.7.0",
+  "description": "Client for the grange document database — agent-first, crash-safe, pay-as-you-go hosted at grange.intrane.fr",
+  "main": "index.js",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/javimosch/grange", "directory": "sdk/node" },
+  "keywords": ["database", "document-db", "agent", "machin", "grange"],
+  "engines": { "node": ">=18" }
+}
