@@ -61,7 +61,9 @@ func cmd_index(fs) {
     f := flag_get(fs, "field")
     if len(f) == 0 { emit_err(81, "input", "missing --field", 1, "pass --field <name> to index") }
     do_open(fs)
-    if gr_index_add(f, flag_get(fs, "sums")) == 0 { emit_err(111, "internal", "could not persist index declaration", 0, "check disk space and permissions") }
+    kind := ""
+    if flag_on(fs, "range") { kind = "range" }
+    if gr_index_add(f, flag_get(fs, "sums"), kind) == 0 { emit_err(111, "internal", "could not persist index declaration", 0, "check disk space and permissions") }
     emit_ok("{\"field\":\"" + jesc(f) + "\",\"sums\":\"" + jesc(flag_get(fs, "sums")) + "\",\"docs_indexed\":" + str(gr_count()) + "}")
 }
 
@@ -80,7 +82,7 @@ func cmd_agg(fs) {
     f := flag_get(fs, "group-by")
     if len(f) == 0 { emit_err(81, "input", "missing --group-by", 1, "pass --group-by <field>") }
     do_open(fs)
-    emit_ok(q_agg(f, flag_get(fs, "sum")))
+    emit_ok(q_agg_full(f, flag_get(fs, "sum"), flag_get(fs, "minmax")))
 }
 
 func cmd_compact(fs) {
@@ -138,6 +140,8 @@ func main() {
     fs = flag_int(fs, "port", "p", "4444", "serve: HTTP port")
     fs = flag_str(fs, "token", "t", "", "serve: bearer token (default GRANGE_TOKEN or generated)")
     fs = flag_str(fs, "sum", "u", "", "agg: comma-separated numeric fields to sum/avg")
+    fs = flag_str(fs, "minmax", "m", "", "agg: comma-separated numeric fields to min/max (scan path)")
+    fs = flag_bool(fs, "range", "R", "index: also keep a sorted projection for > < >= <= queries")
     fs = parse_flags(fs, args())
     rest := flag_args(fs)
     if len(rest) == 0 {

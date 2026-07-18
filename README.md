@@ -10,13 +10,14 @@ grange is a document store written in pure [MFL](https://github.com/javimosch/ma
 
 | metric | grange | SQLite |
 |---|---|---|
-| bulk insert, index maintained | **203k docs/s** | 45k rows/s |
+| bulk insert, 2 indexes maintained | **278k docs/s** | 25k rows/s |
 | point get (avg of 1000) | **5 µs** | 17 µs |
 | indexed count × 1000 | **<1 ms** (O(1) register) | 1,937 ms |
 | indexed find + fetch 33k docs | **5 ms** | 111 ms |
-| group-by count/sum/avg × 1000 | **<1 ms** (O(1) registers) | 51,456 ms |
-| full scan, no index (worst case) | 68 ms | 10 ms |
-| cold open, 100k + index rebuild | 266 ms | — |
+| group-by count/sum/avg × 1000 | **<1 ms** (O(1) registers) | 49,114 ms |
+| range count (`score>=900`) × 1000 | **<1 ms** (after a one-time 79 ms sort) | 257 ms (indexed) |
+| full scan, no index (worst case) | 61 ms | 8 ms |
+| cold open, 100k + index rebuild | 309 ms | — |
 
 The one row SQLite wins is the unindexed scan (typed columns beat per-doc JSON extraction); the answer is `grange index` — one command, and that query class becomes O(1)/O(bucket) forever. Aggregate registers (declare `--sums` on an index) keep per-group count/sum/avg maintained incrementally at write time — a group-by answer costs a map lookup, which is why the agg row is not a typo.
 
@@ -40,7 +41,8 @@ grange find --db ./data --where status=active --limit 50
 grange del  --db ./data --id <id>
 grange count --db ./data --where status=active
 grange index --db ./data --field status --sums score   # declare once: find/count O(bucket|1), agg O(1)
-grange agg --db ./data --group-by status --sum score   # per-group count/sum/avg
+grange index --db ./data --field score --range         # sorted projection: > < >= <= in O(log n)
+grange agg --db ./data --group-by status --sum score   # per-group count/sum/avg (--minmax f for min/max)
 grange compact --db ./data        # fold WAL chunks into a fresh segment
 grange stats --db ./data
 grange guide                      # the machine-readable manual
@@ -80,13 +82,13 @@ doc, found := gr_get("u1")
 
 ```sh
 make build    # needs machin >= 0.108
-make verify   # check + tests (47) + 100k bench + crash harness
+make verify   # check + tests (58) + 100k bench + crash harness
 ```
 
-## Scope & honesty (M2)
+## Scope & honesty (M3)
 
 - Whole dataset + indexes live in memory (memtable = the db); segments make cold open fast, not memory small. Steady-state RSS at 100k docs + 1 index is ~120 MB (fresh process); the bench process peaks at ~440 MB from MFL arena temporaries — a memory diet is the standing target.
-- `--where` supports equality + numeric ranges; only equality clauses use indexes (range clauses scan — sorted range indexes are future work). Aggregate registers cover count/sum/avg; min/max fall back to scan.
+- `--where` supports equality + numeric ranges. Equality clauses use buckets; a single range clause on a `--range` field uses the sorted projection (built lazily on the first range query after a write — the build cost is the first query's, honestly). Multi-clause range queries scan. Aggregate registers cover count/sum/avg; `--minmax` computes min/max on the scan path.
 - Durability is process-crash-exact (proven by `make crash`), OS-crash best-effort (no fsync builtin in MFL yet).
 - `grange serve` handles one request at a time (correctness first); one server per collection. Concurrent readers, multi-collection serving, and range indexes are next.
 

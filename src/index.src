@@ -53,6 +53,7 @@ func ix_add(id, doc) {
     i := 0
     while i < len(g_ifields) {
         f := g_ifields[i]
+        if g_ikind[f] == "range" { g_rdirty[f] = 1 }
         tok := ix_field_tok(doc, f)
         if len(tok) > 0 {
             k := f + "\t" + tok
@@ -77,6 +78,7 @@ func ix_remove(id, doc) {
     i := 0
     while i < len(g_ifields) {
         f := g_ifields[i]
+        if g_ikind[f] == "range" { g_rdirty[f] = 1 }
         tok := ix_field_tok(doc, f)
         if len(tok) > 0 {
             k := f + "\t" + tok
@@ -108,6 +110,14 @@ func ix_clear() {
     g_buckets = make(map[string][]string)
     g_bcount = make(map[string]int)
     g_breg = make(map[string]float)
+    g_rvals = make(map[string][]float)
+    g_rids = make(map[string][]string)
+    g_rdirty = make(map[string]int)
+    i := 0
+    while i < len(g_ifields) {
+        if g_ikind[g_ifields[i]] == "range" { g_rdirty[g_ifields[i]] = 1 }
+        i = i + 1
+    }
 }
 
 func ix_rebuild() {
@@ -134,8 +144,10 @@ func ix_save() (ok) {
     lines := []string{}
     i := 0
     while i < len(g_ifields) {
-        ln := g_ifields[i]
-        if len(g_isums[g_ifields[i]]) > 0 { ln = ln + "\t" + g_isums[g_ifields[i]] }
+        f := g_ifields[i]
+        ln := f
+        if len(g_isums[f]) > 0 || len(g_ikind[f]) > 0 { ln = ln + "\t" + g_isums[f] }
+        if len(g_ikind[f]) > 0 { ln = ln + "\t" + g_ikind[f] }
         lines = append(lines, ln)
         i = i + 1
     }
@@ -146,6 +158,7 @@ func ix_save() (ok) {
 func ix_load() {
     g_ifields = []string{}
     g_isums = make(map[string]string)
+    g_ikind = make(map[string]string)
     content := read_file(gr_dir() + "/fields.idx")
     if len(content) == 0 { return }
     lines := split(content, "\n")
@@ -153,23 +166,24 @@ func ix_load() {
     while i < len(lines) {
         ln := lines[i]
         if len(ln) > 0 {
-            tabp := index(ln, "\t")
-            if tabp >= 0 {
-                f := substr(ln, 0, tabp)
-                g_ifields = append(g_ifields, f)
-                g_isums[f] = substr(ln, tabp + 1, len(ln))
-            } else {
-                g_ifields = append(g_ifields, ln)
-            }
+            parts := split(ln, "\t")
+            f := parts[0]
+            g_ifields = append(g_ifields, f)
+            if len(parts) > 1 { g_isums[f] = parts[1] }
+            if len(parts) > 2 { g_ikind[f] = parts[2] }
         }
         i = i + 1
     }
 }
 
 // gr_index_add declares an index (idempotent on field) and builds it.
-func gr_index_add(f, sums) (ok) {
+// kind "" = equality buckets (+ sum registers); kind "range" adds the sorted
+// projection for numeric > < >= <= queries.
+func gr_index_add(f, sums, kind) (ok) {
     if ix_is_indexed(f) == 0 { g_ifields = append(g_ifields, f) }
     g_isums[f] = sums
+    g_ikind[f] = kind
+    if kind == "range" { g_rdirty[f] = 1 }
     ok = ix_save()
     ix_rebuild()
 }

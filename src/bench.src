@@ -31,7 +31,7 @@ func bench_rss_kb() (kb) {
 func bench_grange(db, n, batch) (out) {
     // 0) declare the index up front — inserts pay the maintenance cost honestly
     ok, errmsg := gr_open(db, "bench")
-    gr_index_add("status", "score")
+    gr_index_add("status", "score", "")
     // 1) indexed bulk insert
     t0 := now_ms()
     i := 0
@@ -82,6 +82,21 @@ func bench_grange(db, n, batch) (out) {
         agg_runs = agg_runs + 1
     }
     t_agg := now_ms() - t0
+    // 5b) range index on score: build cost, then O(log n) counts
+    gr_index_add("score", "", "range")
+    t0 = now_ms()
+    rjson := q_count("score>=900")
+    t_rbuild := now_ms() - t0
+    t0 = now_ms()
+    rcount := 0
+    i = 0
+    while i < 1000 {
+        rb_ensure("score")
+        lo, hi := rb_bounds("score", ">=", "900")
+        rcount = hi - lo
+        i = i + 1
+    }
+    t_range := now_ms() - t0
     // 6) unindexed full scan (kept for honesty — the no-index worst case)
     t0 = now_ms()
     fields := []string{"name"}
@@ -107,7 +122,7 @@ func bench_grange(db, n, batch) (out) {
     if t_insert > 0 { ins_rate = n * 1000 / t_insert }
     intact := 0
     if final == n { intact = 1 }
-    out = "{\"n\":" + str(n) + ",\"insert_ms\":" + str(t_insert) + ",\"insert_per_s\":" + str(ins_rate) + ",\"point_get_1000_ms\":" + str(t_get) + ",\"point_get_hits\":" + str(hits) + ",\"count_1000_ms\":" + str(t_count) + ",\"count_result\":" + str(cnt) + ",\"find_fetch_ms\":" + str(t_find) + ",\"find_fetched\":" + str(fetched) + ",\"find_bytes\":" + str(fbytes) + ",\"agg_1000_ms\":" + str(t_agg) + ",\"agg_sum_paused\":" + ix_fstr(sum_paused) + ",\"noindex_scan_ms\":" + str(t_scan) + ",\"noindex_scan_matches\":" + str(scan_matches) + ",\"compact_ms\":" + str(t_compact) + ",\"cold_open_ms\":" + str(t_open) + ",\"final_count\":" + str(final) + ",\"integrity\":" + str(intact) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}"
+    out = "{\"n\":" + str(n) + ",\"insert_ms\":" + str(t_insert) + ",\"insert_per_s\":" + str(ins_rate) + ",\"point_get_1000_ms\":" + str(t_get) + ",\"point_get_hits\":" + str(hits) + ",\"count_1000_ms\":" + str(t_count) + ",\"count_result\":" + str(cnt) + ",\"find_fetch_ms\":" + str(t_find) + ",\"find_fetched\":" + str(fetched) + ",\"find_bytes\":" + str(fbytes) + ",\"agg_1000_ms\":" + str(t_agg) + ",\"agg_sum_paused\":" + ix_fstr(sum_paused) + ",\"range_build_ms\":" + str(t_rbuild) + ",\"range_count_1000_ms\":" + str(t_range) + ",\"range_count_result\":" + str(rcount) + ",\"noindex_scan_ms\":" + str(t_scan) + ",\"noindex_scan_matches\":" + str(scan_matches) + ",\"compact_ms\":" + str(t_compact) + ",\"cold_open_ms\":" + str(t_open) + ",\"final_count\":" + str(final) + ",\"integrity\":" + str(intact) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}"
 }
 
 func bench_sqlite(path, n, batch) (out) {
@@ -115,6 +130,7 @@ func bench_sqlite(path, n, batch) (out) {
     h := sqlite_open(path)
     sqlite_exec(h, "CREATE TABLE docs (id TEXT PRIMARY KEY, i INT, status TEXT, name TEXT, score INT)")
     sqlite_exec(h, "CREATE INDEX idx_status ON docs(status)")
+    sqlite_exec(h, "CREATE INDEX idx_score ON docs(score)")
     t0 := now_ms()
     sqlite_exec(h, "BEGIN")
     i := 0
@@ -159,13 +175,23 @@ func bench_sqlite(path, n, batch) (out) {
     }
     t_agg := now_ms() - t0
     t0 = now_ms()
+    rc := ""
+    i = 0
+    while i < 1000 {
+        rrows := sqlite_query(h, "SELECT COUNT(*) AS c FROM docs WHERE score >= 900")
+        rcv, rcerr := json_get(rrows, "[0].c")
+        rc = rcv
+        i = i + 1
+    }
+    t_range := now_ms() - t0
+    t0 = now_ms()
     srows := sqlite_query(h, "SELECT COUNT(*) AS c FROM docs WHERE name = ?", []string{"user-777"})
     sm, smerr := json_get(srows, "[0].c")
     t_scan := now_ms() - t0
     sqlite_close(h)
     ins_rate := 0
     if t_insert > 0 { ins_rate = n * 1000 / t_insert }
-    out = "{\"n\":" + str(n) + ",\"insert_ms\":" + str(t_insert) + ",\"insert_per_s\":" + str(ins_rate) + ",\"point_get_1000_ms\":" + str(t_get) + ",\"count_1000_ms\":" + str(t_count) + ",\"count_result\":" + cnt + ",\"find_fetch_ms\":" + str(t_find) + ",\"find_bytes\":" + str(fbytes) + ",\"agg_1000_ms\":" + str(t_agg) + ",\"noindex_scan_ms\":" + str(t_scan) + ",\"noindex_scan_matches\":" + sm + "}"
+    out = "{\"n\":" + str(n) + ",\"insert_ms\":" + str(t_insert) + ",\"insert_per_s\":" + str(ins_rate) + ",\"point_get_1000_ms\":" + str(t_get) + ",\"count_1000_ms\":" + str(t_count) + ",\"count_result\":" + cnt + ",\"find_fetch_ms\":" + str(t_find) + ",\"find_bytes\":" + str(fbytes) + ",\"agg_1000_ms\":" + str(t_agg) + ",\"range_count_1000_ms\":" + str(t_range) + ",\"range_count_result\":" + rc + ",\"noindex_scan_ms\":" + str(t_scan) + ",\"noindex_scan_matches\":" + sm + "}"
 }
 
 func cmd_bench(fs) {

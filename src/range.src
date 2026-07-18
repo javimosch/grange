@@ -1,0 +1,129 @@
+// grange range indexes — M3.
+//
+// A field declared `index --field score --range` gets a SORTED projection:
+// parallel arrays (values ascending, ids in the same order), built lazily on
+// the first range query and invalidated by writes to the field's collection.
+// After a build, a range count is two binary searches (O(log n)) and a range
+// find walks only the matching segment.
+//
+//   g_rvals f -> sorted []float · g_rids f -> []string · g_rdirty f -> 1
+
+var g_rvals = make(map[string][]float)
+var g_rids = make(map[string][]string)
+var g_rdirty = make(map[string]int)
+var g_ikind = make(map[string]string)
+
+// rb_msort sorts vals (with ids carried along) ascending — bottom-up merge
+// sort over preallocated ping-pong buffers, index writes only (no per-pass
+// allocation; MFL slice index assignment is C-speed).
+func rb_msort(vals, ids) (ovals, oids) {
+    n := len(vals)
+    ovals = vals
+    oids = ids
+    if n < 2 { return }
+    bv := []float{}
+    bi := []string{}
+    k := 0
+    while k < n { bv = append(bv, 0.0)  bi = append(bi, "")  k = k + 1 }
+    av := vals
+    ai := ids
+    width := 1
+    while width < n {
+        lo := 0
+        while lo < n {
+            mid := lo + width
+            hi := lo + width * 2
+            if mid > n { mid = n }
+            if hi > n { hi = n }
+            l := lo
+            r := mid
+            w := lo
+            while l < mid && r < hi {
+                if av[l] <= av[r] {
+                    bv[w] = av[l]  bi[w] = ai[l]  l = l + 1
+                } else {
+                    bv[w] = av[r]  bi[w] = ai[r]  r = r + 1
+                }
+                w = w + 1
+            }
+            while l < mid { bv[w] = av[l]  bi[w] = ai[l]  l = l + 1  w = w + 1 }
+            while r < hi { bv[w] = av[r]  bi[w] = ai[r]  r = r + 1  w = w + 1 }
+            lo = hi
+        }
+        tv := av  av = bv  bv = tv
+        ti := ai  ai = bi  bi = ti
+        width = width * 2
+    }
+    ovals = av
+    oids = ai
+}
+
+// rb_rebuild scans the memtable once and (re)builds field f's sorted arrays.
+func rb_rebuild(f) {
+    vals := []float{}
+    ids := []string{}
+    mids := keys(g_mem)
+    i := 0
+    while i < len(mids) {
+        tok := ix_field_tok(g_mem[mids[i]], f)
+        if len(tok) > 0 {
+            c := charat(tok, 0)
+            if c != "\"" && c != "{" && c != "[" && c != "t" && c != "f" && c != "n" {
+                vals = append(vals, parse_float(tok))
+                ids = append(ids, mids[i])
+            }
+        }
+        i = i + 1
+    }
+    sv, si := rb_msort(vals, ids)
+    g_rvals[f] = sv
+    g_rids[f] = si
+    g_rdirty[f] = 0
+}
+
+func rb_ensure(f) {
+    if g_rdirty[f] == 1 || len(g_rvals[f]) != len(g_rids[f]) || (len(g_rvals[f]) == 0 && gr_count() > 0) {
+        rb_rebuild(f)
+    }
+}
+
+// rb_ge: first index with vals[idx] >= x. rb_gt: first with vals[idx] > x.
+func rb_ge(vals, x) (lo) {
+    lo = 0
+    hi := len(vals)
+    while lo < hi {
+        mid := (lo + hi) / 2
+        if vals[mid] >= x { hi = mid } else { lo = mid + 1 }
+    }
+}
+
+func rb_gt(vals, x) (lo) {
+    lo = 0
+    hi := len(vals)
+    while lo < hi {
+        mid := (lo + hi) / 2
+        if vals[mid] > x { hi = mid } else { lo = mid + 1 }
+    }
+}
+
+// rb_bounds resolves op+value to the half-open segment [lo, hi).
+func rb_bounds(f, op, v) (lo, hi) {
+    x := parse_float(v)
+    vals := g_rvals[f]
+    lo = 0
+    hi = len(vals)
+    if op == ">" { lo = rb_gt(vals, x) }
+    if op == ">=" { lo = rb_ge(vals, x) }
+    if op == "<" { hi = rb_ge(vals, x) }
+    if op == "<=" { hi = rb_gt(vals, x) }
+    if op == "=" { lo = rb_ge(vals, x)  hi = rb_gt(vals, x) }
+}
+
+// rb_usable: one clause on a range-declared field with a numeric-compare op.
+func rb_usable(fields, ops) (yes) {
+    yes = 0
+    if len(fields) != 1 { return }
+    if g_ikind[fields[0]] != "range" { return }
+    if ops[0] == "=" { return }
+    yes = 1
+}

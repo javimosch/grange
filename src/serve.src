@@ -112,7 +112,7 @@ func srv_handle(req) (res) {
             res = srv_err("400 Bad Request", "input", "missing group-by query param")
             return
         }
-        res = srv_ok(q_agg(f, query(req, "sum")))
+        res = srv_ok(q_agg_full(f, query(req, "sum"), query(req, "minmax")))
         return
     }
     if req.method == "POST" && req.path == "/index" {
@@ -121,7 +121,7 @@ func srv_handle(req) (res) {
             res = srv_err("400 Bad Request", "input", "body must be {\"field\":\"...\",\"sums\":\"a,b\"}")
             return
         }
-        if gr_index_add(f, srv_body_str(req, "sums")) == 0 {
+        if gr_index_add(f, srv_body_str(req, "sums"), srv_body_str(req, "kind")) == 0 {
             res = srv_err("500 Internal Server Error", "internal", "could not persist index declaration")
             return
         }

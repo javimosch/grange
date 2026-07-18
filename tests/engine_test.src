@@ -68,7 +68,7 @@ func main() {
     gr_put("b", "{\"s\":\"x\",\"v\":7}")
     gr_put("c", "{\"s\":\"y\",\"v\":1}")
     gr_commit()
-    gr_index_add("s", "v")
+    gr_index_add("s", "v", "")
     assert_eq_int(g_bcount["s\t\"x\""], 2, "bucket count x=2")
     assert_eq_int(len(g_buckets["s\t\"x\""]), 2, "bucket ids x=2")
     assert_eq_str(ix_fstr(g_breg["s\t\"x\"\tv"]), "12", "register sum x=12")
@@ -90,7 +90,7 @@ func main() {
     // numeric tokens index too
     gr_put("n1", "{\"k\":42,\"v\":1}")
     gr_commit()
-    gr_index_add("k", "")
+    gr_index_add("k", "", "")
     assert_eq_int(g_bcount["k\t42"], 1, "numeric token bucket")
     assert_eq_str(ix_bucket("k", "42"), "k\t42", "ix_bucket resolves raw token")
 
@@ -119,6 +119,49 @@ func main() {
     asum, aerr := json_get(ajson, ".groups[1].sum_v")
     acnt, aerr2 := json_get(ajson, ".groups[1].count")
     assert(len(aerr) == 0, "q_agg has groups")
+
+    // ---- M3: sorted range indexes + agg min/max ----
+    ok, errmsg = gr_open(db, "rng")
+    i := 0
+    while i < 100 {
+        gr_put("m" + str(i), "{\"g\":\"" + str(i % 2) + "\",\"v\":" + str(i) + "}")
+        i = i + 1
+    }
+    gr_commit()
+    gr_index_add("v", "", "range")
+    rjson := q_count("v>=90")
+    rv, rerr := json_get(rjson, ".count")
+    assert_eq_str(rv, "10", "range count v>=90 = 10")
+    rm, rerr2 := json_get(rjson, ".mode")
+    assert_eq_str(rm, "\"range\"", "range mode used")
+    rjson = q_count("v<10")
+    rv, rerr = json_get(rjson, ".count")
+    assert_eq_str(rv, "10", "range count v<10 = 10")
+    // sorted order + find segment walk
+    rb_ensure("v")
+    assert_eq_int(len(g_rvals["v"]), 100, "projection covers all docs")
+    assert(g_rvals["v"][0] <= g_rvals["v"][50], "projection sorted")
+    fjson2 := q_find("v>97", 0)
+    fv2, ferr2 := json_get(fjson2, ".count")
+    assert_eq_str(fv2, "2", "range find v>97 = 2")
+    // writes invalidate, next query rebuilds correctly
+    gr_put("extra", "{\"g\":\"0\",\"v\":1000}")
+    gr_commit()
+    assert_eq_int(g_rdirty["v"], 1, "write marks range dirty")
+    rjson = q_count("v>=1000")
+    rv, rerr = json_get(rjson, ".count")
+    assert_eq_str(rv, "1", "rebuild after write sees new doc")
+    // agg min/max via scan
+    mjson := q_agg_full("g", "", "v")
+    mn, merr := json_get(mjson, ".groups[0].min_v")
+    mx, merr2 := json_get(mjson, ".groups[0].max_v")
+    assert(len(merr) == 0 && len(merr2) == 0, "agg min/max present")
+    // range decl persists across reopen
+    ok, errmsg = gr_open(db, "rng")
+    assert_eq_str(g_ikind["v"], "range", "range kind persisted")
+    rjson = q_count("v<=4")
+    rv, rerr = json_get(rjson, ".count")
+    assert_eq_str(rv, "5", "range works after reopen")
 
     // ix_fstr precision (the %g bug): big integral sums print exactly
     assert_eq_str(ix_fstr(16649667.0), "16649667", "fstr big int exact")

@@ -114,6 +114,23 @@ func wh_candidates(fields, ops, vals) (ids, mode) {
 // shared by the CLI verbs and the HTTP server.
 func q_find(wh, limit) (data) {
     fields, ops, vals := wh_pairs(wh)
+    // range fast path: walk only the sorted segment, no per-doc matching
+    if rb_usable(fields, ops) == 1 {
+        rb_ensure(fields[0])
+        lo, hi := rb_bounds(fields[0], ops[0], vals[0])
+        rids := g_rids[fields[0]]
+        items := []string{}
+        n := 0
+        i := lo
+        while i < hi {
+            if limit > 0 && n >= limit { break }
+            items = append(items, "{\"id\":\"" + jesc(rids[i]) + "\",\"doc\":" + g_mem[rids[i]] + "}")
+            n = n + 1
+            i = i + 1
+        }
+        data = "{\"count\":" + str(n) + ",\"mode\":\"range\",\"items\":[" + join(items, ",") + "]}"
+        return
+    }
     ids, mode := wh_candidates(fields, ops, vals)
     items := []string{}
     n := 0
@@ -141,6 +158,13 @@ func q_count(wh) (data) {
         data = "{\"count\":" + str(g_bcount[ix_bucket(fields[0], vals[0])]) + ",\"mode\":\"indexed\"}"
         return
     }
+    // range fast path: two binary searches
+    if rb_usable(fields, ops) == 1 {
+        rb_ensure(fields[0])
+        lo, hi := rb_bounds(fields[0], ops[0], vals[0])
+        data = "{\"count\":" + str(hi - lo) + ",\"mode\":\"range\"}"
+        return
+    }
     ids, mode := wh_candidates(fields, ops, vals)
     n := 0
     i := 0
@@ -164,10 +188,18 @@ func agg_group(gtok, n, sf, sums) (item) {
 }
 
 func q_agg(f, sumspec) (data) {
+    data = q_agg_full(f, sumspec, "")
+}
+
+// q_agg_full adds min/max fields (mmspec, comma-separated) — those force the
+// scan path (registers cannot maintain min/max under deletes).
+func q_agg_full(f, sumspec, mmspec) (data) {
     sf := []string{}
     if len(sumspec) > 0 { sf = split(sumspec, ",") }
+    mm := []string{}
+    if len(mmspec) > 0 { mm = split(mmspec, ",") }
     // indexed fast path: registers already hold count+sums per group
-    if ix_is_indexed(f) == 1 && (len(sumspec) == 0 || contains("," + g_isums[f] + ",", "," + sumspec + ",") || g_isums[f] == sumspec) {
+    if len(mm) == 0 && ix_is_indexed(f) == 1 && (len(sumspec) == 0 || contains("," + g_isums[f] + ",", "," + sumspec + ",") || g_isums[f] == sumspec) {
         pre := f + "\t"
         gsums := make(map[string]float)
         bks := keys(g_bcount)
@@ -191,6 +223,8 @@ func q_agg(f, sumspec) (data) {
     // scan path
     gcount := make(map[string]int)
     gsums := make(map[string]float)
+    gmin := make(map[string]float)
+    gmax := make(map[string]float)
     ids := keys(g_mem)
     i := 0
     while i < len(ids) {
@@ -198,10 +232,22 @@ func q_agg(f, sumspec) (data) {
         gtok := ix_field_tok(doc, f)
         if len(gtok) > 0 {
             gcount[gtok] = gcount[gtok] + 1
+            first := gcount[gtok] == 1
             j := 0
             while j < len(sf) {
                 stok := ix_field_tok(doc, sf[j])
                 if len(stok) > 0 { gsums[gtok + "\t" + sf[j]] = gsums[gtok + "\t" + sf[j]] + ix_tok_num(stok) }
+                j = j + 1
+            }
+            j = 0
+            while j < len(mm) {
+                mtok := ix_field_tok(doc, mm[j])
+                if len(mtok) > 0 {
+                    mv := ix_tok_num(mtok)
+                    mk := gtok + "\t" + mm[j]
+                    if first || mv < gmin[mk] { gmin[mk] = mv }
+                    if first || mv > gmax[mk] { gmax[mk] = mv }
+                }
                 j = j + 1
             }
         }
@@ -211,7 +257,14 @@ func q_agg(f, sumspec) (data) {
     items := []string{}
     i = 0
     while i < len(gtoks) {
-        items = append(items, agg_group(gtoks[i], gcount[gtoks[i]], sf, gsums))
+        it := agg_group(gtoks[i], gcount[gtoks[i]], sf, gsums)
+        j := 0
+        while j < len(mm) {
+            mk := gtoks[i] + "\t" + mm[j]
+            it = substr(it, 0, len(it) - 1) + ",\"min_" + mm[j] + "\":" + ix_fstr(gmin[mk]) + ",\"max_" + mm[j] + "\":" + ix_fstr(gmax[mk]) + "}"
+            j = j + 1
+        }
+        items = append(items, it)
         i = i + 1
     }
     data = "{\"group_by\":\"" + jesc(f) + "\",\"mode\":\"scan\",\"groups\":[" + join(items, ",") + "]}"
