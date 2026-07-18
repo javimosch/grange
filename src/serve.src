@@ -42,6 +42,13 @@ func srv_role(req) (role, tid) {
     if has_prefix(h, "Bearer ") { tok = substr(h, 7, len(h)) }
     if len(tok) == 0 { return }
     if tok == g_srv_token { role = "admin"  return }
+    if has(g_tenants, tok) == false && g_srv_follow == 1 {
+        // a tenant created on the primary after this follower started:
+        // refresh _sys from disk and rescan before rejecting
+        uok, uerr := gr_use(g_srv_db, "_sys")
+        if uok == 1 { gr_refresh() }
+        tn_load_cache()
+    }
     if has(g_tenants, tok) {
         role = "tenant"
         tid = g_tenants[tok]
