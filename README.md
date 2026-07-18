@@ -102,6 +102,20 @@ gr_commit()                        // durable: one WAL chunk
 doc, found := gr_get("u1")
 ```
 
+## Read replicas
+
+The immutable WAL doubles as a replication log, so replicas need no new
+machinery — and no shared memory, so the race-freedom proof stands:
+
+```sh
+grange serve --db ./data --follow --port 4445   # local read-only follower: refreshes from the db dir before every read
+grange follow --from https://grange.intrane.fr --rtoken gt_... --db ./replica   # LIVE local replica of a hosted db over the /watch feed
+```
+
+`follow` resyncs via `/export?format=lines` when behind, then applies watch
+deltas (puts + deletes), committing them to its own local WAL. `make crash`-grade
+durability applies to the replica too, because it IS a grange db.
+
 ## Build & verify
 
 ```sh

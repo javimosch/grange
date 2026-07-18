@@ -28,6 +28,7 @@ var g_skipped_chunks = 0
 var g_replayed_chunks = 0
 var g_ttl = make(map[string]int)
 var g_seq = 0
+var g_seq_base = 0
 var g_chg = []string{}
 var g_pend_ops = []string{}
 
@@ -154,7 +155,11 @@ func gr_open(db, coll) (ok, errmsg) {
     g_pend = []string{}
     g_pend_recs = 0
     g_pend_ops = []string{}
-    g_seq = 0
+    // epoch-based seq: a follower holding a seq from before this open (or a
+    // brand-new follower at 0) falls below the epoch and gets a resync —
+    // history from earlier process lifetimes is not in the ring.
+    g_seq_base = now_ms()
+    g_seq = g_seq_base
     g_chg = []string{}
     g_skipped_chunks = 0
     g_replayed_chunks = 0
@@ -379,6 +384,7 @@ var R_rids = make(map[string]map[string][]string)
 var R_rdirty = make(map[string]map[string]int)
 var R_ttl = make(map[string]map[string]int)
 var R_seq = make(map[string]int)
+var R_seqbase = make(map[string]int)
 var R_chg = make(map[string][]string)
 
 func gr_key(db, coll) (k) {
@@ -403,6 +409,7 @@ func gr_park() {
     R_rdirty[k] = g_rdirty
     R_ttl[k] = g_ttl
     R_seq[k] = g_seq
+    R_seqbase[k] = g_seq_base
     R_chg[k] = g_chg
 }
 
@@ -435,10 +442,105 @@ func gr_use(db, coll) (ok, errmsg) {
         g_rdirty = R_rdirty[k]
         g_ttl = R_ttl[k]
         g_seq = R_seq[k]
+        g_seq_base = R_seqbase[k]
         g_chg = R_chg[k]
         g_pend_ops = []string{}
         return
     }
     ok, errmsg = gr_open(db, coll)
     if ok == 1 { gr_park() }
+}
+
+// ---- read-replica support (M12) ----
+
+// gr_apply_live applies record lines through the full write path (indexes,
+// registers, ttl, change feed) WITHOUT staging to the WAL — for a follower
+// ingesting chunks someone else already made durable.
+func gr_apply_live(lines) (recs) {
+    recs = 0
+    i := 0
+    n := len(lines)
+    while i < n {
+        ln := lines[i]
+        if has_prefix(ln, "p|") {
+            if i + 1 >= n { recs = -1  return }
+            id := substr(ln, 2, len(ln))
+            if len(g_ifields) > 0 {
+                if has(g_mem, id) { ix_remove(id, g_mem[id]) }
+                ix_add(id, lines[i+1])
+            }
+            g_mem[id] = lines[i+1]
+            gr_ttl_note(id, lines[i+1])
+            g_seq = g_seq + 1
+            g_chg = append(g_chg, "{\"seq\":" + str(g_seq) + ",\"op\":\"put\",\"id\":\"" + id + "\"}")
+            i = i + 2
+            recs = recs + 1
+        } else if has_prefix(ln, "d|") {
+            id := substr(ln, 2, len(ln))
+            if len(g_ifields) > 0 && has(g_mem, id) { ix_remove(id, g_mem[id]) }
+            delete(g_mem, id)
+            delete(g_ttl, id)
+            g_seq = g_seq + 1
+            g_chg = append(g_chg, "{\"seq\":" + str(g_seq) + ",\"op\":\"del\",\"id\":\"" + id + "\"}")
+            i = i + 1
+            recs = recs + 1
+        } else {
+            recs = -1
+            return
+        }
+    }
+    if len(g_chg) > 400 {
+        nw := []string{}
+        i = len(g_chg) - 200
+        while i < len(g_chg) { nw = append(nw, g_chg[i])  i = i + 1 }
+        g_chg = nw
+    }
+}
+
+// gr_refresh catches up with chunks another PROCESS appended to this
+// collection's directory (the immutable WAL doubles as a replication log).
+// Same generation: replay only chunks >= g_next_chunk, live. New generation
+// (someone compacted): full reopen. Returns records applied (-1 = reopened).
+func gr_refresh() (applied) {
+    applied = 0
+    entries := list_dir(gr_dir())
+    maxgen := g_gen
+    i := 0
+    while i < len(entries) {
+        e := entries[i]
+        if has_prefix(e, "seg-") && has_suffix(e, ".grg") {
+            gv := parse_int(substr(e, 4, len(e)-4))
+            if gv > maxgen { maxgen = gv }
+        }
+        i = i + 1
+    }
+    if maxgen != g_gen {
+        db := g_db
+        coll := g_coll
+        ok, errmsg := gr_open(db, coll)
+        applied = -1
+        return
+    }
+    pre := "wal-" + gr_pad6(g_gen) + "-"
+    fresh := []int{}
+    i = 0
+    while i < len(entries) {
+        e := entries[i]
+        if has_prefix(e, pre) && has_suffix(e, ".grg") {
+            cn := parse_int(substr(e, len(pre), len(e)-4))
+            if cn >= g_next_chunk { fresh = append(fresh, cn) }
+        }
+        i = i + 1
+    }
+    fresh = gr_sort_ints(fresh)
+    i = 0
+    while i < len(fresh) {
+        lines, nrecs, cok := gr_load_recfile(gr_dir() + "/" + pre + gr_pad6(fresh[i]) + ".grg")
+        if cok == 1 {
+            n := gr_apply_live(lines)
+            if n > 0 { applied = applied + n }
+        }
+        g_next_chunk = fresh[i] + 1
+        i = i + 1
+    }
 }

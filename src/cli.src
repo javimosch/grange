@@ -4,6 +4,86 @@
 //
 // Verbs: put get del find count compact stats bench torture guide help-json
 
+type Chg struct { seq int  op string  id string }
+
+// cmd_follow replicates a remote grange collection into a local db, live,
+// over the /watch feed (resync via /export?format=lines when too far behind).
+func cmd_follow(fs) {
+    from := flag_get(fs, "from")
+    rtok := flag_get(fs, "rtoken")
+    if len(from) == 0 || len(rtok) == 0 { emit_err(81, "input", "missing --from <url> / --rtoken <gt_...>", 1, "point at a grange server and its bearer token") }
+    do_open(fs)
+    rdb := flag_get(fs, "remote-db")
+    rcoll := flag_get(fs, "remote-coll")
+    if len(rdb) == 0 { rdb = "default" }
+    if len(rcoll) == 0 { rcoll = "default" }
+    qs := "db=" + url_encode(rdb) + "&coll=" + url_encode(rcoll)
+    hdrs := []string{"authorization: Bearer " + rtok}
+    seqfile := gr_dir() + "/follow.seq"
+    seq := parse_int(read_file(seqfile))
+    once := flag_on(fs, "once")
+    while true {
+        status, resp, herr := http_request("GET", from + "/watch?" + qs + "&since=" + str(seq) + "&timeout=25", hdrs, "")
+        if len(herr) > 0 || status != 200 {
+            write(2, "{\"event\":\"retry\",\"error\":\"" + jesc(herr) + " status=" + str(status) + "\"}\n")
+            sleep(2000)
+            if once { emit_err(103, "integration", "primary unreachable", 1, "check --from and --rtoken") }
+            continue
+        }
+        rs, rerr := json_get(resp, ".data.resync")
+        newseq_s, serr := json_get(resp, ".data.seq")
+        newseq := parse_int(newseq_s)
+        applied := 0
+        if rs == "1" {
+            estatus, elines, eerr := http_request("GET", from + "/export?" + qs + "&format=lines", hdrs, "")
+            if estatus == 200 {
+                lines := split(elines, "\n")
+                i := 0
+                while i < len(lines) {
+                    tabp := index(lines[i], "\t")
+                    if tabp > 0 {
+                        gr_put(substr(lines[i], 0, tabp), substr(lines[i], tabp + 1, len(lines[i])))
+                        applied = applied + 1
+                    }
+                    i = i + 1
+                }
+                gr_commit()
+                seq = newseq
+            }
+        } else {
+            carr, cerr := json_get(resp, ".data.changes")
+            if len(cerr) == 0 {
+                chgs := parse(carr, []Chg{})
+                i := 0
+                while i < len(chgs) {
+                    if chgs[i].op == "del" {
+                        gr_del(chgs[i].id)
+                        applied = applied + 1
+                    } else {
+                        gstatus, gresp, gerr := http_request("GET", from + "/get?" + qs + "&id=" + url_encode(chgs[i].id), hdrs, "")
+                        if gstatus == 200 {
+                            dv, derr := json_get(gresp, ".data.doc")
+                            if len(derr) == 0 {
+                                gr_put(chgs[i].id, dv)
+                                applied = applied + 1
+                            }
+                        }
+                    }
+                    i = i + 1
+                }
+                if applied > 0 { gr_commit() }
+                seq = newseq
+            }
+        }
+        write_file(seqfile, str(seq))
+        write(2, "{\"event\":\"sync\",\"seq\":" + str(seq) + ",\"applied\":" + str(applied) + ",\"docs\":" + str(gr_count()) + "}\n")
+        if once {
+            emit_ok("{\"seq\":" + str(seq) + ",\"applied\":" + str(applied) + ",\"docs\":" + str(gr_count()) + "}")
+            return
+        }
+    }
+}
+
 // ---- verbs ----
 
 func need_db(fs) (db) {
@@ -140,6 +220,12 @@ func main() {
     fs = flag_int(fs, "n", "n", "100000", "bench/torture record count")
     fs = flag_int(fs, "batch", "b", "1000", "commit batch size")
     fs = flag_bool(fs, "vs-sqlite", "S", "bench: also run the same workload on the SQLite builtin")
+    fs = flag_bool(fs, "follow", "F", "serve: read-only follower (auto-refreshes from the db dir)")
+    fs = flag_str(fs, "from", "", "", "follow: primary grange URL")
+    fs = flag_str(fs, "rtoken", "", "", "follow: primary bearer token")
+    fs = flag_str(fs, "remote-db", "", "", "follow: remote database (default 'default')")
+    fs = flag_str(fs, "remote-coll", "", "", "follow: remote collection (default 'default')")
+    fs = flag_bool(fs, "once", "1", "follow: one sync cycle then exit")
     fs = flag_str(fs, "field", "f", "", "index: field to index")
     fs = flag_str(fs, "sums", "s", "", "index: comma-separated numeric fields to keep sum registers for")
     fs = flag_str(fs, "group-by", "g", "", "agg: field to group by")
@@ -167,6 +253,7 @@ func main() {
     if verb == "agg" { cmd_agg(fs)  return }
     if verb == "stats" { cmd_stats(fs)  return }
     if verb == "serve" { cmd_serve(fs)  return }
+    if verb == "follow" { cmd_follow(fs)  return }
     if verb == "bench" { cmd_bench(fs)  return }
     if verb == "torture" { cmd_torture(fs)  return }
     if verb == "guide" { cmd_guide()  return }

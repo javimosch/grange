@@ -19,6 +19,7 @@ var g_w_coll = []string{}
 var g_w_since = []int{}
 var g_w_deadline = []int{}
 var g_park = 0
+var g_srv_follow = 0
 
 func srv_json(status, body) (res) {
     res = response(status, "application/json", body)
@@ -79,6 +80,7 @@ func watch_payload(since) (data) {
     resync := 0
     if since > g_seq { resync = 1 }
     floor := g_seq - len(g_chg)
+    if floor < g_seq_base { floor = g_seq_base }
     if since < floor { resync = 1 }
     if resync == 0 {
         i := 0
@@ -119,6 +121,7 @@ func watch_tick() {
     i := 0
     while i < len(g_w_fd) {
         uok, uerr := gr_use(g_w_db[i], g_w_coll[i])
+        if g_srv_follow == 1 && uok == 1 { gr_refresh() }
         fire := 0
         if uok == 0 { fire = 1 }
         if g_seq > g_w_since[i] { fire = 1 }
@@ -174,7 +177,7 @@ func srv_handle(req) (res) {
         res = srv_err("401 Unauthorized", "auth", "missing or wrong bearer token (tenants self-serve at POST /tenants with X-Peage-Wallet)")
         return
     }
-    tn_sweep()
+    if g_srv_follow == 0 { tn_sweep() }
     // tenants get a two-level namespace: db (?db=, default "default") / collection
     root := g_srv_db
     if role == "tenant" {
@@ -228,6 +231,10 @@ func srv_handle(req) (res) {
         res = srv_ok("{\"collections\":[" + join(items, ",") + "]}")
         return
     }
+    if g_srv_follow == 1 && req.method == "POST" && req.path != "/shutdown" {
+        res = srv_err("403 Forbidden", "read-only", "this is a follower; write to the primary")
+        return
+    }
     if req.method == "POST" && req.path == "/shutdown" && role != "admin" {
         res = srv_err("403 Forbidden", "auth", "admin only")
         return
@@ -236,6 +243,7 @@ func srv_handle(req) (res) {
         res = srv_err("400 Bad Request", "input", "bad collection name or open failed")
         return
     }
+    if g_srv_follow == 1 { gr_refresh() }
     if req.method == "POST" && req.path == "/put" {
         doc := srv_body_field(req, "doc")
         if valid_doc(doc) == 0 {
@@ -375,6 +383,18 @@ func srv_handle(req) (res) {
         return
     }
     if req.method == "GET" && has_prefix(req.path, "/export") {
+        if query(req, "format") == "lines" {
+            gr_sweep_expired()
+            ids := keys(g_mem)
+            lines := []string{}
+            i := 0
+            while i < len(ids) {
+                lines = append(lines, ids[i] + "\t" + g_mem[ids[i]])
+                i = i + 1
+            }
+            res = response("200 OK", "text/plain", join(lines, "\n"))
+            return
+        }
         res = srv_ok(q_find(query(req, "where"), 0))
         return
     }
@@ -427,6 +447,7 @@ func srv_handle(req) (res) {
 func cmd_serve(fs) {
     do_open(fs)
     g_srv_db = need_db(fs)
+    if flag_on(fs, "follow") { g_srv_follow = 1 }
     gr_park()
     tn_load_cache()
     g_sweep_last = now_ms()

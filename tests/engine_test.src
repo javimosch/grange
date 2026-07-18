@@ -211,6 +211,18 @@ func main() {
     ok, errmsg = gr_open(db, "ttl")
     assert_eq_int(gr_count(), 1, "expiry durable across reopen")
 
+    // ---- M12: epoch seq: a fresh/stale follower must resync after reopen ----
+    ok, errmsg = gr_open(db, "epoch")
+    gr_put("e1", "{\"v\":1}")
+    gr_commit()
+    assert(g_seq > 1000000, "seq is epoch-based (not small int)")
+    wp := watch_payload(0)
+    wr, wrerr := json_get(wp, ".resync")
+    assert_eq_str(wr, "1", "since=0 forces resync after open")
+    wp = watch_payload(g_seq)
+    wr, wrerr = json_get(wp, ".resync")
+    assert_eq_str(wr, "0", "current seq is a valid delta position")
+
     // ---- M5: metering math ----
     // 1 GB above free tier for 30 days at 15c/GB/month = 15 cents
     free := 52428800

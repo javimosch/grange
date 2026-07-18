@@ -31,6 +31,7 @@ func llms_txt() (t) {
         "STATS   curl -s \"$G/stats?coll=leads\" -H \"$A\"\n" +
         "COMPACT curl -s -X POST $G/compact -H \"$A\" -d '{\"coll\":\"leads\"}'             # fold WAL chunks; run when stats.chunks_replayed grows\n" +
         "WATCH   curl -s \"$G/watch?coll=jobs&since=0&timeout=25\" -H \"$A\"       # LONG-POLL: blocks until the collection changes past since -> {seq,changes:[{seq,op,id}]}; poll again with the returned seq\n" +
+        "EXPORT  curl -s \"$G/export?coll=leads&format=lines\" -H \"$A\"              # NDJSON 'id<TAB>doc' lines — pipe straight into /bulk of another grange\n" +
         "USAGE   curl -s $G/usage -H \"$A\"\n" +
         "HEALTH  curl -s $G/health                                                      # open, no auth\n\n" +
         "Docs are single-line minified JSON. Errors: {\"ok\":false,\"error\":{type,message}} with proper HTTP codes.\n\n" +
@@ -50,8 +51,7 @@ func llms_txt() (t) {
         "        g := grange_client(url, token)  g = grange_use(g, \"crm\", \"leads\")\n" +
         "        id, ok := grange_put(g, \"\", doc)  n := grange_count(g, \"co=acme\")\n\n" +
         "Durability: every write request is one immutable checksummed WAL chunk (process-crash-exact).\n" +
-        "Your data is exportable at any time (find with a high limit, per collection) and the engine is OSS —\n" +
-        "self-host the same binary if you outgrow the hosted rail.\n"
+        "Your data is exportable at any time and REPLICABLE: `grange follow --from https://grange.intrane.fr --rtoken gt_... --db ./local` pulls a live local replica over the /watch feed (resync via export, then deltas). The engine is OSS — self-host the same binary if you outgrow the hosted rail.\n"
 }
 
 func landing_html() (h) {
