@@ -67,6 +67,18 @@ func srv_use(req, root) (ok) {
 }
 
 func srv_handle(req) (res) {
+    if req.method == "GET" && (req.path == "/" || req.path == "/index.html") {
+        res = ok_html(landing_html())
+        return
+    }
+    if req.method == "GET" && has_prefix(req.path, "/llms.txt") {
+        res = ok_text(llms_txt())
+        return
+    }
+    if req.method == "GET" && has_prefix(req.path, "/guide") {
+        res = ok_text(llms_txt())
+        return
+    }
     if req.path == "/health" || has_prefix(req.path, "/health?") {
         res = srv_ok("{\"docs\":" + str(gr_count()) + "}")
         return
