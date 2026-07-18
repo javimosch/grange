@@ -80,7 +80,7 @@ func srv_handle(req) (res) {
         return
     }
     if req.path == "/health" || has_prefix(req.path, "/health?") {
-        res = srv_ok("{\"docs\":" + str(gr_count()) + "}")
+        res = srv_ok("{\"status\":\"up\"}")
         return
     }
     // self-serve tenant signup: a peage wallet is the only credential
