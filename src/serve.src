@@ -173,6 +173,14 @@ func srv_handle(req) (res) {
             res = srv_err("400 Bad Request", "input", "invalid id")
             return
         }
+        ttl := parse_int(srv_body_field(req, "ttl_seconds"))
+        if ttl > 0 {
+            if charat(doc, 0) != "{" {
+                res = srv_err("400 Bad Request", "input", "ttl_seconds needs an object doc")
+                return
+            }
+            doc = "{\"_expires\":" + str(now_ms() + ttl * 1000) + "," + substr(doc, 1, len(doc))
+        }
         gr_put(id, doc)
         if gr_commit() == 0 {
             res = srv_err("500 Internal Server Error", "internal", "wal chunk write failed")
@@ -208,6 +216,10 @@ func srv_handle(req) (res) {
         limit := parse_int(query(req, "limit"))
         if limit == 0 { limit = 100 }
         res = srv_ok(q_find(query(req, "where"), limit))
+        return
+    }
+    if req.method == "GET" && has_prefix(req.path, "/export") {
+        res = srv_ok(q_find(query(req, "where"), 0))
         return
     }
     if req.method == "GET" && has_prefix(req.path, "/count") {

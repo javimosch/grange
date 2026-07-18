@@ -22,6 +22,11 @@ func cmd_put(fs) {
     id := flag_get(fs, "id")
     if len(id) == 0 { id = to_hex(rand_bytes(8)) }
     if valid_id(id) == 0 { emit_err(82, "input", "invalid --id (no | / newline, non-empty)", 1, "use a simple token id or omit --id for an auto id") }
+    ttl := flag_int_val(fs, "ttl")
+    if ttl > 0 {
+        if charat(doc, 0) != "{" { emit_err(82, "input", "--ttl needs an object doc", 1, "wrap the value in an object") }
+        doc = "{\"_expires\":" + str(now_ms() + ttl * 1000) + "," + substr(doc, 1, len(doc))
+    }
     do_open(fs)
     gr_put(id, doc)
     if gr_commit() == 0 { emit_err(111, "internal", "wal chunk write failed", 0, "check disk space and permissions") }
@@ -131,6 +136,7 @@ func main() {
     fs = flag_str(fs, "doc", "D", "", "document body (minified JSON)")
     fs = flag_str(fs, "where", "w", "", "filter: field=value[,field=value] equality, ANDed")
     fs = flag_int(fs, "limit", "l", "100", "max results for find")
+    fs = flag_int(fs, "ttl", "T", "0", "put: doc lifetime in seconds (0 = forever)")
     fs = flag_int(fs, "n", "n", "100000", "bench/torture record count")
     fs = flag_int(fs, "batch", "b", "1000", "commit batch size")
     fs = flag_bool(fs, "vs-sqlite", "S", "bench: also run the same workload on the SQLite builtin")
@@ -153,6 +159,7 @@ func main() {
     if verb == "get" { cmd_get(fs)  return }
     if verb == "del" { cmd_del(fs)  return }
     if verb == "find" { cmd_find(fs)  return }
+    if verb == "export" { do_open(fs)  emit_ok(q_find(flag_get(fs, "where"), 0))  return }
     if verb == "count" { cmd_count(fs)  return }
     if verb == "compact" { cmd_compact(fs)  return }
     if verb == "index" { cmd_index(fs)  return }

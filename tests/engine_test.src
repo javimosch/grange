@@ -186,6 +186,31 @@ func main() {
     ok, errmsg = gr_open(db, "c2")
     assert_eq_int(gr_count(), 3, "use: pending write committed before park")
 
+    // ---- M8: TTL documents ----
+    ok, errmsg = gr_open(db, "ttl")
+    exp := now_ms() + 600
+    gr_put("short", "{\"_expires\":" + str(exp) + ",\"v\":1}")
+    gr_put("forever", "{\"v\":2}")
+    gr_commit()
+    assert_eq_int(len(keys(g_ttl)), 1, "ttl tracked for one doc")
+    doc, found = gr_get("short")
+    assert_eq_int(found, 1, "ttl doc readable before expiry")
+    // survives replay
+    ok, errmsg = gr_open(db, "ttl")
+    assert_eq_int(len(keys(g_ttl)), 1, "ttl map rebuilt on open")
+    gr_put("short2", "{\"_expires\":" + str(exp) + ",\"v\":3}")
+    gr_commit()
+    sleep(700)
+    doc, found = gr_get("short")
+    assert_eq_int(found, 0, "expired doc gone on get (lazy)")
+    assert_eq_int(gr_sweep_expired(), 1, "sweep removes the other expired doc")
+    assert_eq_int(gr_count(), 1, "only forever doc remains")
+    doc, found = gr_get("forever")
+    assert_eq_int(found, 1, "non-ttl doc untouched")
+    // expiry is durable (tombstone committed): reopen shows 1 doc
+    ok, errmsg = gr_open(db, "ttl")
+    assert_eq_int(gr_count(), 1, "expiry durable across reopen")
+
     // ---- M5: metering math ----
     // 1 GB above free tier for 30 days at 15c/GB/month = 15 cents
     free := 52428800

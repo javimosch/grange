@@ -26,6 +26,7 @@ var g_pend = []string{}
 var g_pend_recs = 0
 var g_skipped_chunks = 0
 var g_replayed_chunks = 0
+var g_ttl = make(map[string]int)
 
 func gr_dir() (p) {
     p = g_db + "/" + g_coll
@@ -92,11 +93,13 @@ func gr_apply_lines(lines) (recs) {
             if i + 1 >= n { recs = -1  return }
             id := substr(ln, 2, len(ln))
             g_mem[id] = lines[i+1]
+            gr_ttl_note(id, lines[i+1])
             i = i + 2
             recs = recs + 1
         } else if has_prefix(ln, "d|") {
             id := substr(ln, 2, len(ln))
             delete(g_mem, id)
+            delete(g_ttl, id)
             i = i + 1
             recs = recs + 1
         } else {
@@ -142,6 +145,7 @@ func gr_open(db, coll) (ok, errmsg) {
     g_db = db
     g_coll = coll
     g_mem = make(map[string]string)
+    g_ttl = make(map[string]int)
     g_gen = 0
     g_next_chunk = 0
     g_pend = []string{}
@@ -213,6 +217,32 @@ func gr_open(db, coll) (ok, errmsg) {
     ok = 1
 }
 
+// gr_ttl_note tracks/clears a doc's expiry from its "_expires" field (ms).
+func gr_ttl_note(id, doc) {
+    if has_prefix(doc, "{\"_expires\":") {
+        v, err := json_get(doc, "._expires")
+        if len(err) == 0 { g_ttl[id] = parse_int(v)  return }
+    }
+    delete(g_ttl, id)
+}
+
+// gr_sweep_expired hard-deletes every expired doc; returns how many.
+func gr_sweep_expired() (n) {
+    n = 0
+    ids := keys(g_ttl)
+    if len(ids) == 0 { return }
+    nowms := now_ms()
+    i := 0
+    while i < len(ids) {
+        if g_ttl[ids[i]] <= nowms {
+            gr_del(ids[i])
+            n = n + 1
+        }
+        i = i + 1
+    }
+    if n > 0 { gr_commit() }
+}
+
 // gr_put stages a write (visible immediately; durable at gr_commit).
 func gr_put(id, doc) {
     if len(g_ifields) > 0 {
@@ -220,6 +250,7 @@ func gr_put(id, doc) {
         ix_add(id, doc)
     }
     g_mem[id] = doc
+    gr_ttl_note(id, doc)
     g_pend = append(g_pend, "p|" + id)
     g_pend = append(g_pend, doc)
     g_pend_recs = g_pend_recs + 1
@@ -228,12 +259,16 @@ func gr_put(id, doc) {
 // gr_del stages a delete. Returns 1 if the id existed.
 func gr_del(id) (existed) {
     existed = 0
+    // build the tombstone BEFORE mutating the maps: on machin < 0.109 a
+    // keys()-derived id aliases map storage that delete() frees
+    tomb := "d|" + id
     if has(g_mem, id) {
         existed = 1
         if len(g_ifields) > 0 { ix_remove(id, g_mem[id]) }
     }
     delete(g_mem, id)
-    g_pend = append(g_pend, "d|" + id)
+    delete(g_ttl, id)
+    g_pend = append(g_pend, tomb)
     g_pend_recs = g_pend_recs + 1
 }
 
@@ -254,6 +289,11 @@ func gr_get(id) (doc, found) {
     doc = ""
     found = 0
     if has(g_mem, id) {
+        if has(g_ttl, id) && g_ttl[id] <= now_ms() {
+            gr_del(id)
+            gr_commit()
+            return
+        }
         doc = g_mem[id]
         found = 1
     }
@@ -314,6 +354,7 @@ var R_breg = make(map[string]map[string]float)
 var R_rvals = make(map[string]map[string][]float)
 var R_rids = make(map[string]map[string][]string)
 var R_rdirty = make(map[string]map[string]int)
+var R_ttl = make(map[string]map[string]int)
 
 func gr_key(db, coll) (k) {
     k = db + "\t" + coll
@@ -335,6 +376,7 @@ func gr_park() {
     R_rvals[k] = g_rvals
     R_rids[k] = g_rids
     R_rdirty[k] = g_rdirty
+    R_ttl[k] = g_ttl
 }
 
 // gr_use switches the active collection, loading it from disk the first time.
@@ -364,6 +406,7 @@ func gr_use(db, coll) (ok, errmsg) {
         g_rvals = R_rvals[k]
         g_rids = R_rids[k]
         g_rdirty = R_rdirty[k]
+        g_ttl = R_ttl[k]
         return
     }
     ok, errmsg = gr_open(db, coll)

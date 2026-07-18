@@ -113,6 +113,7 @@ func wh_candidates(fields, ops, vals) (ids, mode) {
 // q_find / q_count / q_agg are the query layer — pure data-JSON in/out,
 // shared by the CLI verbs and the HTTP server.
 func q_find(wh, limit) (data) {
+    gr_sweep_expired()
     fields, ops, vals := wh_pairs(wh)
     // range fast path: walk only the sorted segment, no per-doc matching
     if rb_usable(fields, ops) == 1 {
@@ -148,6 +149,7 @@ func q_find(wh, limit) (data) {
 }
 
 func q_count(wh) (data) {
+    gr_sweep_expired()
     fields, ops, vals := wh_pairs(wh)
     if len(fields) == 0 {
         data = "{\"count\":" + str(gr_count()) + "}"
@@ -194,6 +196,7 @@ func q_agg(f, sumspec) (data) {
 // q_agg_full adds min/max fields (mmspec, comma-separated) — those force the
 // scan path (registers cannot maintain min/max under deletes).
 func q_agg_full(f, sumspec, mmspec) (data) {
+    gr_sweep_expired()
     sf := []string{}
     if len(sumspec) > 0 { sf = split(sumspec, ",") }
     mm := []string{}
