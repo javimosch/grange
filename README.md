@@ -80,7 +80,7 @@ doc, found := gr_get("u1")
 
 ```sh
 make build    # needs machin >= 0.108
-make verify   # check + tests (21) + 100k bench + crash harness
+make verify   # check + tests (47) + 100k bench + crash harness
 ```
 
 ## Scope & honesty (M2)
