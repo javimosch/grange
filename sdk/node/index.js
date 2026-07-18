@@ -87,6 +87,29 @@ class Grange {
     return this._req('POST', '/index', { db: this._db, coll: this._coll, field, sums, kind });
   }
 
+  // Bulk: one commit for many ops. docs = array of objects (auto ids) or
+  // [id, doc] pairs. Returns { ops, ids } (ids capped at 100).
+  async putMany(docs) {
+    const lines = docs.map(d => Array.isArray(d) ? `${d[0]}\t${JSON.stringify(d[1])}` : JSON.stringify(d));
+    return this.bulk(lines);
+  }
+
+  async delMany(ids) { return this.bulk(ids.map(id => `-\t${id}`)); }
+
+  async bulk(lines) {
+    const res = await fetch(`${this.url}/bulk?${this._qs}`, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain', authorization: `Bearer ${this.token}` },
+      body: lines.join('\n'),
+    });
+    const env = await res.json().catch(() => null);
+    if (!env || env.ok !== true) {
+      const err = env && env.error ? env.error : { type: 'protocol', message: `HTTP ${res.status}` };
+      throw new GrangeError(err.type, err.message, res.status);
+    }
+    return env.data;
+  }
+
   async collections() { return (await this._req('GET', `/collections?db=${encodeURIComponent(this._db)}`)).collections; }
   async dbs() { return (await this._req('GET', '/dbs')).dbs; }
   async usage() { return this._req('GET', '/usage'); }

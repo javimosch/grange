@@ -25,6 +25,7 @@ func llms_txt() (t) {
         "COUNT   curl -s \"$G/count?coll=leads&where=co%3Dacme\" -H \"$A\"                 # O(1) if the field is indexed\n" +
         "INDEX   curl -s -X POST $G/index -H \"$A\" -d '{\"coll\":\"leads\",\"field\":\"co\",\"sums\":\"score\"}'   # kind:\"range\" for > < >= <=\n" +
         "AGG     curl -s \"$G/agg?coll=leads&group-by=co&sum=score\" -H \"$A\"             # count/sum/avg O(1) via registers; minmax= scans\n" +
+        "BULK    curl -s -X POST \"$G/bulk?coll=leads\" -H \"$A\" --data-binary @ops.ndjson   # one line per op: '{...}' put auto-id · 'id<TAB>{...}' put · '-<TAB>id' del; ONE commit, all-or-nothing; 263k docs/s measured\n" +
         "COLLS   curl -s $G/collections -H \"$A\"\n" +
         "DBS     curl -s $G/dbs -H \"$A\"                                              # tenants have MULTIPLE databases: pass db= on any call (default 'default')\n" +
         "STATS   curl -s \"$G/stats?coll=leads\" -H \"$A\"\n" +

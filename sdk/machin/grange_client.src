@@ -105,3 +105,15 @@ func grange_usage(g) (data) {
     status, resp := grange_req(g, "GET", "/usage", "")
     data = grange_data(status, resp)
 }
+
+// grange_bulk applies newline-delimited ops in ONE commit:
+// "{...}" put auto-id · "<id>\t{...}" put · "-\t<id>" delete.
+// Returns ops applied (-1 on failure).
+func grange_bulk(g, lines) (nops) {
+    nops = -1
+    status, resp, herr := http_request("POST", g.base + "/bulk?" + grange_qs(g), []string{"content-type: text/plain", "authorization: Bearer " + g.token}, lines)
+    if len(herr) > 0 { return }
+    if status != 200 { return }
+    d, derr := json_get(resp, ".data.ops")
+    if len(derr) == 0 { nops = parse_int(d) }
+}

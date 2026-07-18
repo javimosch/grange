@@ -173,6 +173,69 @@ func (c *Client) Index(field, sums, kind string) error {
 	return c.do("POST", "/index", map[string]any{"db": c.db, "coll": c.coll, "field": field, "sums": sums, "kind": kind}, nil)
 }
 
+// BulkResult reports a bulk apply.
+type BulkResult struct {
+	Ops int      `json:"ops"`
+	IDs []string `json:"ids"`
+}
+
+// PutMany stores many docs in ONE commit (auto ids). For ids or deletes, use Bulk.
+func (c *Client) PutMany(docs []any) (*BulkResult, error) {
+	lines := make([]string, 0, len(docs))
+	for _, d := range docs {
+		b, err := json.Marshal(d)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, string(b))
+	}
+	return c.Bulk(lines)
+}
+
+// Bulk applies newline-delimited ops in one commit:
+// "{...}" put auto-id · "<id>\t{...}" put · "-\t<id>" delete.
+func (c *Client) Bulk(lines []string) (*BulkResult, error) {
+	body := bytes.NewReader([]byte(joinLines(lines)))
+	req, err := http.NewRequest("POST", c.Base+"/bulk?"+c.qs(), body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, fmt.Errorf("grange: bad response (%d): %s", resp.StatusCode, raw)
+	}
+	if !env.OK {
+		if env.Error != nil {
+			return nil, fmt.Errorf("grange: %s: %s", env.Error.Type, env.Error.Message)
+		}
+		return nil, fmt.Errorf("grange: request failed (%d)", resp.StatusCode)
+	}
+	var out BulkResult
+	return &out, json.Unmarshal(env.Data, &out)
+}
+
+func joinLines(lines []string) string {
+	out := ""
+	for i, l := range lines {
+		if i > 0 {
+			out += "\n"
+		}
+		out += l
+	}
+	return out
+}
+
 // Usage returns the tenant's storage/billing view as raw JSON.
 func (c *Client) Usage() (json.RawMessage, error) {
 	var out json.RawMessage

@@ -218,6 +218,69 @@ func srv_handle(req) (res) {
         res = srv_ok(q_find(query(req, "where"), limit))
         return
     }
+    // bulk: newline-delimited ops, ONE commit for the whole batch.
+    //   {...}            put, auto id
+    //   <id>\t{...}      put with id
+    //   -\t<id>          delete
+    if req.method == "POST" && (req.path == "/bulk" || has_prefix(req.path, "/bulk?")) {
+        lines := split(req.body, "\n")
+        if len(lines) > 50000 {
+            res = srv_err("400 Bad Request", "input", "max 50000 ops per bulk request")
+            return
+        }
+        // pass 1: validate everything — nothing stages until the batch is clean,
+        // so a bad line can never leak a partial batch into the next commit
+        i := 0
+        while i < len(lines) {
+            ln := trim(lines[i])
+            if len(ln) > 0 && has_prefix(ln, "-\t") == false {
+                tabp := index(ln, "\t")
+                bdoc := ln
+                bid := "x"
+                if tabp > 0 {
+                    bid = substr(ln, 0, tabp)
+                    bdoc = substr(ln, tabp + 1, len(ln))
+                }
+                if valid_id(bid) == 0 || valid_doc(bdoc) == 0 {
+                    res = srv_err("400 Bad Request", "input", "bad op at line " + str(i + 1) + " (nothing applied)")
+                    return
+                }
+            }
+            i = i + 1
+        }
+        // pass 2: stage + single commit
+        ids := []string{}
+        nops := 0
+        i = 0
+        while i < len(lines) {
+            ln := trim(lines[i])
+            if len(ln) > 0 {
+                if has_prefix(ln, "-\t") {
+                    gr_del(substr(ln, 2, len(ln)))
+                    nops = nops + 1
+                } else {
+                    tabp := index(ln, "\t")
+                    bid := ""
+                    bdoc := ln
+                    if tabp > 0 {
+                        bid = substr(ln, 0, tabp)
+                        bdoc = substr(ln, tabp + 1, len(ln))
+                    }
+                    if len(bid) == 0 { bid = to_hex(rand_bytes(8)) }
+                    gr_put(bid, bdoc)
+                    if len(ids) < 100 { ids = append(ids, "\"" + jesc(bid) + "\"") }
+                    nops = nops + 1
+                }
+            }
+            i = i + 1
+        }
+        if gr_commit() == 0 {
+            res = srv_err("500 Internal Server Error", "internal", "wal chunk write failed")
+            return
+        }
+        res = srv_ok("{\"ops\":" + str(nops) + ",\"ids\":[" + join(ids, ",") + "]}")
+        return
+    }
     if req.method == "GET" && has_prefix(req.path, "/export") {
         res = srv_ok(q_find(query(req, "where"), 0))
         return
@@ -279,7 +342,7 @@ func cmd_serve(fs) {
     g_srv_token = flag_get(fs, "token")
     if len(g_srv_token) == 0 { g_srv_token = env("GRANGE_TOKEN") }
     if len(g_srv_token) == 0 { g_srv_token = to_hex(rand_bytes(16)) }
-    harden(1048576, 10000)
+    harden(16777216, 30000)
     println("{\"event\":\"listening\",\"port\":" + str(port) + ",\"db\":\"" + jesc(flag_get(fs, "db")) + "\",\"coll\":\"" + jesc(flag_get(fs, "coll")) + "\",\"docs\":" + str(gr_count()) + ",\"token\":\"" + g_srv_token + "\"}")
     flush()
     server := listen(port)
