@@ -78,6 +78,6 @@ func landing_html() (h) {
         "<div class=\"card\"><h3>No lock-in</h3><p>The engine is MIT OSS. Export with one curl; self-host the same binary when you outgrow the hosted rail.</p></div></div>" +
         "<h2>the interface is the docs</h2>" +
         "<pre>curl -s https://grange.intrane.fr/llms.txt   # the full contract, written for agents</pre>" +
-        "<footer>grange is a single static binary written in <a href=\"https://github.com/javimosch/machin\">machin (MFL)</a>. An <a href=\"https://intrane.fr\">intrane.fr</a> experiment. Storage billed via <a href=\"https://peage.intrane.fr\">peage</a>. · <a href=\"https://github.com/javimosch/grange\">source</a> · Contact: javi@intrane.fr</footer>" +
+        "<footer>grange is a single static binary written in <a href=\"https://github.com/javimosch/machin\">machin (MFL)</a>. An <a href=\"https://intrane.fr\">intrane.fr</a> experiment. Storage billed via <a href=\"https://peage.intrane.fr\">peage</a>. · <a href=\"https://github.com/javimosch/grange\">source</a> · <a href=\"https://status.dev.intrane.fr/g/grange\">status</a> · Contact: javi@intrane.fr</footer>" +
         "</main></body></html>"
 }
