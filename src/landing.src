@@ -17,7 +17,9 @@ func llms_txt() (t) {
         "## Pricing (pay-as-you-go, no subscription)\n\n" +
         "Storage: " + str(tn_price()) + " cents/GB/month, first " + str(tn_free_bytes() / 1048576) + " MB free. Accrued continuously\n" +
         "(price/30 per GB-day), charged to your wallet via peage when >= 5 cents. Queries and\n" +
-        "writes are free. GET /usage shows bytes, accrual, and charges at any time.\n\n" +
+        "writes are free under FAIR USE: " + str(tn_rate_limit()) + " requests/min and 5 concurrent watchers per tenant;\n" +
+        "beyond that you get 429 {type:rate-limited, retry_after_seconds} — back off and retry.\n" +
+        "Throttling is recorded; your GET /usage shows throttled_requests_total.\n\n" +
         "## The API (Authorization: Bearer gt_... on every call; ?coll= picks a collection, default 'default')\n\n" +
         "PUT     curl -s -X POST $G/put -H \"$A\" -d '{\"coll\":\"leads\",\"id\":\"l1\",\"doc\":{\"co\":\"acme\",\"score\":9}}'   # id optional (auto)\n" +
         "GET     curl -s \"$G/get?coll=leads&id=l1\" -H \"$A\"\n" +

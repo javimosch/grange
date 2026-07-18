@@ -15,6 +15,61 @@
 
 var g_tenants = make(map[string]string)
 var g_sweep_last = 0
+// fair-use rate limiting (per tenant, fixed 60s window) + trigger traceability
+var g_rl_count = make(map[string]int)
+var g_rl_win = make(map[string]int)
+var g_rl_hits = make(map[string]int)
+var g_rl_logged = make(map[string]int)
+
+func tn_rate_limit() (n) {
+    n = parse_int(env("GRANGE_RATE_PER_MIN"))
+    if n == 0 { n = 300 }
+}
+
+// tn_rl_check counts one request for the tenant; returns 1 if over the cap.
+// Every trigger is traceable: journal line once per window (with running
+// totals) + persistent counter flushed to _sys by the sweep + /usage field.
+func tn_rl_check(tid) (limited) {
+    limited = 0
+    nowms := now_ms()
+    if nowms - g_rl_win[tid] >= 60000 {
+        g_rl_win[tid] = nowms
+        g_rl_count[tid] = 0
+    }
+    g_rl_count[tid] = g_rl_count[tid] + 1
+    if g_rl_count[tid] <= tn_rate_limit() { return }
+    limited = 1
+    g_rl_hits[tid] = g_rl_hits[tid] + 1
+    if g_rl_logged[tid] != g_rl_win[tid] {
+        g_rl_logged[tid] = g_rl_win[tid]
+        write(2, "{\"event\":\"rate_limited\",\"tenant\":\"" + tid + "\",\"window_requests\":" + str(g_rl_count[tid]) + ",\"limit_per_min\":" + str(tn_rate_limit()) + ",\"throttled_total\":" + str(g_rl_hits[tid]) + ",\"ts\":" + str(nowms) + "}\n")
+    }
+}
+
+func tn_rl_retry_after(tid) (s) {
+    s = (g_rl_win[tid] + 60000 - now_ms()) / 1000
+    if s < 1 { s = 1 }
+}
+
+// tn_rl_flush persists throttle counters into _sys (called by the sweep;
+// caller must have _sys active). Merges with any previously flushed total.
+func tn_rl_flush() {
+    tids := keys(g_rl_hits)
+    i := 0
+    while i < len(tids) {
+        if g_rl_hits[tids[i]] > 0 {
+            prev, pfound := gr_get("rl-" + tids[i])
+            base := 0
+            if pfound == 1 {
+                bv, berr := json_get(prev, ".throttled_total")
+                if len(berr) == 0 { base = parse_int(bv) }
+            }
+            gr_put("rl-" + tids[i], "{\"throttled_total\":" + str(base + g_rl_hits[tids[i]]) + ",\"last_ms\":" + str(now_ms()) + ",\"limit_per_min\":" + str(tn_rate_limit()) + "}")
+            delete(g_rl_hits, tids[i])
+        }
+        i = i + 1
+    }
+}
 
 func tn_price() (c) {
     c = parse_int(env("GRANGE_PRICE_CENTS_GB_MONTH"))
@@ -141,6 +196,7 @@ func tn_sweep() {
     g_sweep_last = nowms
     ok, errmsg := gr_use(g_srv_db, "_sys")
     if ok == 0 { return }
+    tn_rl_flush()
     ids := keys(g_mem)
     i := 0
     while i < len(ids) {
@@ -162,5 +218,11 @@ func tn_usage(tid) (data) {
     chgs, cerr := json_get(bill, ".charged_cents")
     pds, perr := json_get(bill, ".past_due")
     pending := parse_float(accs) + tn_accrue_cents(bytes, now_ms() - parse_int(lasts), tn_price(), tn_free_bytes())
-    data = "{\"tenant\":\"" + jesc(tid) + "\",\"bytes\":" + str(bytes) + ",\"free_bytes\":" + str(tn_free_bytes()) + ",\"price_cents_gb_month\":" + str(tn_price()) + ",\"accrued_cents\":" + ix_fstr(pending) + ",\"charged_cents_total\":" + chgs + ",\"past_due\":" + pds + ",\"pay_rail\":\"peage\"}"
+    thr := g_rl_hits[tid]
+    rlrec, rlfound := gr_get("rl-" + tid)
+    if rlfound == 1 {
+        tv, terr := json_get(rlrec, ".throttled_total")
+        if len(terr) == 0 { thr = thr + parse_int(tv) }
+    }
+    data = "{\"tenant\":\"" + jesc(tid) + "\",\"bytes\":" + str(bytes) + ",\"free_bytes\":" + str(tn_free_bytes()) + ",\"price_cents_gb_month\":" + str(tn_price()) + ",\"accrued_cents\":" + ix_fstr(pending) + ",\"charged_cents_total\":" + chgs + ",\"past_due\":" + pds + ",\"rate_limit_per_min\":" + str(tn_rate_limit()) + ",\"throttled_requests_total\":" + str(thr) + ",\"pay_rail\":\"peage\"}"
 }
