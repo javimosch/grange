@@ -1,5 +1,5 @@
 BIN = grange
-SRCS = framework/flags.src framework/machweb.src src/engine.src src/cold.src src/index.src src/range.src src/query.src src/bench.src src/tenant.src src/landing.src src/serve.src src/cli.src
+SRCS = framework/flags.src framework/machweb.src src/engine.src src/registry.src src/cold.src src/index.src src/range.src src/query.src src/bench.src src/tenant.src src/landing.src src/serve.src src/cli.src
 
 build:
 	machin encode $(SRCS) > $(BIN).mfl
@@ -9,7 +9,7 @@ check:
 	machin check $(SRCS)
 
 test:
-	machin test framework/machweb.src src/engine.src src/cold.src src/index.src src/range.src src/query.src src/tenant.src src/serve.src tests/engine_test.src
+	machin test framework/machweb.src src/engine.src src/registry.src src/cold.src src/index.src src/range.src src/query.src src/tenant.src src/serve.src tests/engine_test.src
 
 bench: build
 	rm -rf /tmp/grange-bench
