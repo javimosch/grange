@@ -85,12 +85,13 @@ func bench_grange(db, n, batch) (out) {
     // 6) unindexed full scan (kept for honesty — the no-index worst case)
     t0 = now_ms()
     fields := []string{"name"}
+    wops := []string{"="}
     vals := []string{"user-777"}
     ids := keys(g_mem)
     scan_matches := 0
     i = 0
     while i < len(ids) {
-        if wh_match(g_mem[ids[i]], fields, vals) == 1 { scan_matches = scan_matches + 1 }
+        if wh_match(g_mem[ids[i]], fields, wops, vals) == 1 { scan_matches = scan_matches + 1 }
         i = i + 1
     }
     t_scan := now_ms() - t0

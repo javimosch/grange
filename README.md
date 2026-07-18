@@ -46,6 +46,23 @@ grange stats --db ./data
 grange guide                      # the machine-readable manual
 ```
 
+`--where` clauses AND together and support `=` plus numeric `>` `<` `>=` `<=`:
+`--where "status=active,score>=100"`.
+
+Or run it as a server (`grange serve --db ./data --port 4444`) — same operations
+over HTTP/JSON with bearer-token auth (`--token` / `GRANGE_TOKEN`, else one is
+generated and printed at startup):
+
+```sh
+curl -X POST :4444/put -H "Authorization: Bearer $T" -d '{"doc":{"status":"active","score":9}}'
+curl ":4444/find?where=score>=5" -H "Authorization: Bearer $T"    # /get /del /count /agg /index /stats /compact /health
+```
+
+The server is **single-actor by construction**: a sequential accept loop with
+zero goroutines, so there is nothing to race on — and machin's inferred
+data-race analysis (`machin check`, no annotations) verifies that on every
+build. Concurrent-reader serving is deliberately future work.
+
 Embedded, from any machin app:
 
 ```sh
@@ -66,11 +83,11 @@ make build    # needs machin >= 0.108
 make verify   # check + tests (21) + 100k bench + crash harness
 ```
 
-## Scope & honesty (M1)
+## Scope & honesty (M2)
 
 - Whole dataset + indexes live in memory (memtable = the db); segments make cold open fast, not memory small. Steady-state RSS at 100k docs + 1 index is ~120 MB (fresh process); the bench process peaks at ~440 MB from MFL arena temporaries — a memory diet is the standing target.
-- `--where` is top-level equality only; index buckets are equality buckets (no range queries yet). Aggregate registers cover count/sum/avg; min/max fall back to scan.
+- `--where` supports equality + numeric ranges; only equality clauses use indexes (range clauses scan — sorted range indexes are future work). Aggregate registers cover count/sum/avg; min/max fall back to scan.
 - Durability is process-crash-exact (proven by `make crash`), OS-crash best-effort (no fsync builtin in MFL yet).
-- Single process, single writer. The concurrent server (`grange serve`) and range indexes are next.
+- `grange serve` handles one request at a time (correctness first); one server per collection. Concurrent readers, multi-collection serving, and range indexes are next.
 
 MIT.

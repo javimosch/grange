@@ -1,0 +1,166 @@
+// grange serve — the HTTP/JSON face (the seed of the hosted version).
+//
+// SINGLE-ACTOR BY CONSTRUCTION: the server is a sequential accept loop with
+// zero goroutines — one request at a time touches the memtable, so there is
+// nothing to race on and `machin check`'s inferred race analysis stays clean.
+// (machweb's `serve` spawns a goroutine per connection; we deliberately call
+// its machweb_handle directly instead.)
+//
+// Auth: every route except /health needs Authorization: Bearer <token>
+// (or ?token=). Token comes from --token / GRANGE_TOKEN, else one is
+// generated and printed at startup.
+
+var g_srv_token = ""
+
+func srv_json(status, body) (res) {
+    res = response(status, "application/json", body)
+}
+
+func srv_err(status, etype, msg) (res) {
+    res = srv_json(status, "{\"ok\":false,\"error\":{\"type\":\"" + etype + "\",\"message\":\"" + jesc(msg) + "\"}}")
+}
+
+func srv_ok(data) (res) {
+    res = srv_json("200 OK", "{\"ok\":true,\"data\":" + data + "}")
+}
+
+func srv_authed(req) (yes) {
+    yes = 0
+    h := header(req, "authorization")
+    if h == "Bearer " + g_srv_token { yes = 1  return }
+    if query(req, "token") == g_srv_token { yes = 1 }
+}
+
+// srv_body_field pulls a raw JSON token out of the request body ("" if absent).
+func srv_body_field(req, f) (tok) {
+    tok = ""
+    v, err := json_get(req.body, "." + f)
+    if len(err) == 0 { tok = v }
+}
+
+// srv_body_str is srv_body_field with the quotes of a JSON string stripped.
+func srv_body_str(req, f) (s) {
+    s = srv_body_field(req, f)
+    if len(s) > 1 && charat(s, 0) == "\"" { s = substr(s, 1, len(s) - 1) }
+}
+
+func srv_handle(req) (res) {
+    if req.path == "/health" || has_prefix(req.path, "/health?") {
+        res = srv_ok("{\"docs\":" + str(gr_count()) + "}")
+        return
+    }
+    if srv_authed(req) == 0 {
+        res = srv_err("401 Unauthorized", "auth", "missing or wrong bearer token")
+        return
+    }
+    if req.method == "POST" && req.path == "/put" {
+        doc := srv_body_field(req, "doc")
+        if valid_doc(doc) == 0 {
+            res = srv_err("400 Bad Request", "input", "body must be {\"doc\":{...}} with minified JSON")
+            return
+        }
+        id := srv_body_str(req, "id")
+        if len(id) == 0 { id = to_hex(rand_bytes(8)) }
+        if valid_id(id) == 0 {
+            res = srv_err("400 Bad Request", "input", "invalid id")
+            return
+        }
+        gr_put(id, doc)
+        if gr_commit() == 0 {
+            res = srv_err("500 Internal Server Error", "internal", "wal chunk write failed")
+            return
+        }
+        res = srv_ok("{\"id\":\"" + jesc(id) + "\"}")
+        return
+    }
+    if req.method == "GET" && has_prefix(req.path, "/get") {
+        id := query(req, "id")
+        doc, found := gr_get(id)
+        if found == 0 {
+            res = srv_err("404 Not Found", "not-found", "no document with id " + id)
+            return
+        }
+        res = srv_ok("{\"id\":\"" + jesc(id) + "\",\"doc\":" + doc + "}")
+        return
+    }
+    if req.method == "POST" && req.path == "/del" {
+        id := srv_body_str(req, "id")
+        if gr_del(id) == 0 {
+            res = srv_err("404 Not Found", "not-found", "no document with id " + id)
+            return
+        }
+        if gr_commit() == 0 {
+            res = srv_err("500 Internal Server Error", "internal", "wal chunk write failed")
+            return
+        }
+        res = srv_ok("{\"id\":\"" + jesc(id) + "\",\"deleted\":true}")
+        return
+    }
+    if req.method == "GET" && has_prefix(req.path, "/find") {
+        limit := parse_int(query(req, "limit"))
+        if limit == 0 { limit = 100 }
+        res = srv_ok(q_find(query(req, "where"), limit))
+        return
+    }
+    if req.method == "GET" && has_prefix(req.path, "/count") {
+        res = srv_ok(q_count(query(req, "where")))
+        return
+    }
+    if req.method == "GET" && has_prefix(req.path, "/agg") {
+        f := query(req, "group-by")
+        if len(f) == 0 {
+            res = srv_err("400 Bad Request", "input", "missing group-by query param")
+            return
+        }
+        res = srv_ok(q_agg(f, query(req, "sum")))
+        return
+    }
+    if req.method == "POST" && req.path == "/index" {
+        f := srv_body_str(req, "field")
+        if len(f) == 0 {
+            res = srv_err("400 Bad Request", "input", "body must be {\"field\":\"...\",\"sums\":\"a,b\"}")
+            return
+        }
+        if gr_index_add(f, srv_body_str(req, "sums")) == 0 {
+            res = srv_err("500 Internal Server Error", "internal", "could not persist index declaration")
+            return
+        }
+        res = srv_ok("{\"field\":\"" + jesc(f) + "\",\"docs_indexed\":" + str(gr_count()) + "}")
+        return
+    }
+    if req.method == "POST" && req.path == "/compact" {
+        if gr_compact() == 0 {
+            res = srv_err("500 Internal Server Error", "internal", "compaction failed; old files were NOT deleted")
+            return
+        }
+        res = srv_ok("{\"gen\":" + str(g_gen) + ",\"docs\":" + str(gr_count()) + "}")
+        return
+    }
+    if req.method == "GET" && has_prefix(req.path, "/stats") {
+        res = srv_ok("{\"docs\":" + str(gr_count()) + ",\"gen\":" + str(g_gen) + ",\"chunks_replayed\":" + str(g_replayed_chunks) + ",\"indexes\":" + str(len(g_ifields)) + "}")
+        return
+    }
+    if req.method == "POST" && req.path == "/shutdown" {
+        gr_commit()
+        write(2, "{\"event\":\"shutdown\"}\n")
+        exit(0)
+    }
+    res = srv_err("404 Not Found", "not-found", "no such route; see grange guide")
+}
+
+func cmd_serve(fs) {
+    do_open(fs)
+    port := flag_int_val(fs, "port")
+    if port == 0 { port = 4444 }
+    g_srv_token = flag_get(fs, "token")
+    if len(g_srv_token) == 0 { g_srv_token = env("GRANGE_TOKEN") }
+    if len(g_srv_token) == 0 { g_srv_token = to_hex(rand_bytes(16)) }
+    harden(1048576, 10000)
+    println("{\"event\":\"listening\",\"port\":" + str(port) + ",\"db\":\"" + jesc(flag_get(fs, "db")) + "\",\"coll\":\"" + jesc(flag_get(fs, "coll")) + "\",\"docs\":" + str(gr_count()) + ",\"token\":\"" + g_srv_token + "\"}")
+    flush()
+    server := listen(port)
+    for {
+        conn := accept(server)
+        machweb_handle(conn, func(req) { return srv_handle(req) })
+    }
+}

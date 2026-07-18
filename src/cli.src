@@ -4,76 +4,6 @@
 //
 // Verbs: put get del find count compact stats bench torture guide help-json
 
-// ---- output helpers ----
-
-func jesc(s) (out) {
-    out = replace(s, "\\", "\\\\")
-    out = replace(out, "\"", "\\\"")
-    out = replace(out, "\n", "\\n")
-    out = replace(out, "\t", "\\t")
-}
-
-func emit_ok(dataJson) {
-    println("{\"ok\":true,\"data\":" + dataJson + "}")
-}
-
-func emit_err(code, etype, msg, recoverable, suggestion) {
-    rec := "false"
-    if recoverable == 1 { rec = "true" }
-    write(2, "{\"ok\":false,\"error\":{\"type\":\"" + etype + "\",\"message\":\"" + jesc(msg) + "\",\"recoverable\":" + rec + ",\"suggestions\":[\"" + jesc(suggestion) + "\"]}}\n")
-    exit(code)
-}
-
-// ---- doc / id validation ----
-
-func valid_id(id) (ok) {
-    ok = 0
-    if len(id) == 0 { return }
-    if contains(id, "|") { return }
-    if contains(id, "\n") { return }
-    if contains(id, "/") { return }
-    ok = 1
-}
-
-func valid_doc(doc) (ok) {
-    ok = 0
-    if len(doc) == 0 { return }
-    if contains(doc, "\n") { return }
-    if contains(doc, "\t") { return }
-    first := charat(doc, 0)
-    if first != "{" && first != "[" { return }
-    ok = 1
-}
-
-// ---- filter matching: --where "field=value,field2=value2" (equality, AND) ----
-
-func wh_pairs(wh) (fields, vals) {
-    fields = []string{}
-    vals = []string{}
-    if len(wh) == 0 { return }
-    parts := split(wh, ",")
-    i := 0
-    while i < len(parts) {
-        eq := index(parts[i], "=")
-        if eq > 0 {
-            fields = append(fields, substr(parts[i], 0, eq))
-            vals = append(vals, substr(parts[i], eq + 1, len(parts[i])))
-        }
-        i = i + 1
-    }
-}
-
-func wh_match(doc, fields, vals) (m) {
-    m = 1
-    i := 0
-    while i < len(fields) {
-        got, err := json_get(doc, "." + fields[i])
-        if len(err) > 0 { m = 0  return }
-        if got != vals[i] && got != "\"" + vals[i] + "\"" { m = 0  return }
-        i = i + 1
-    }
-}
-
 // ---- verbs ----
 
 func need_db(fs) (db) {
@@ -117,63 +47,14 @@ func cmd_del(fs) {
     emit_ok("{\"id\":\"" + jesc(id) + "\",\"deleted\":true}")
 }
 
-// wh_candidates picks the id set to test: an indexed where-field's bucket if
-// one exists (mode "indexed"), else every id (mode "scan").
-func wh_candidates(fields, vals) (ids, mode) {
-    ids = []string{}
-    mode = "scan"
-    i := 0
-    while i < len(fields) {
-        if ix_is_indexed(fields[i]) == 1 {
-            ids = g_buckets[ix_bucket(fields[i], vals[i])]
-            mode = "indexed"
-            return
-        }
-        i = i + 1
-    }
-    ids = keys(g_mem)
-}
-
 func cmd_find(fs) {
     do_open(fs)
-    fields, vals := wh_pairs(flag_get(fs, "where"))
-    limit := flag_int_val(fs, "limit")
-    ids, mode := wh_candidates(fields, vals)
-    items := []string{}
-    n := 0
-    i := 0
-    while i < len(ids) {
-        if limit > 0 && n >= limit { break }
-        doc := g_mem[ids[i]]
-        if wh_match(doc, fields, vals) == 1 {
-            items = append(items, "{\"id\":\"" + jesc(ids[i]) + "\",\"doc\":" + doc + "}")
-            n = n + 1
-        }
-        i = i + 1
-    }
-    emit_ok("{\"count\":" + str(n) + ",\"mode\":\"" + mode + "\",\"items\":[" + join(items, ",") + "]}")
+    emit_ok(q_find(flag_get(fs, "where"), flag_int_val(fs, "limit")))
 }
 
 func cmd_count(fs) {
     do_open(fs)
-    fields, vals := wh_pairs(flag_get(fs, "where"))
-    if len(fields) == 0 {
-        emit_ok("{\"count\":" + str(gr_count()) + "}")
-        return
-    }
-    // O(1) fast path: a single where clause on an indexed field
-    if len(fields) == 1 && ix_is_indexed(fields[0]) == 1 {
-        emit_ok("{\"count\":" + str(g_bcount[ix_bucket(fields[0], vals[0])]) + ",\"mode\":\"indexed\"}")
-        return
-    }
-    ids, mode := wh_candidates(fields, vals)
-    n := 0
-    i := 0
-    while i < len(ids) {
-        if wh_match(g_mem[ids[i]], fields, vals) == 1 { n = n + 1 }
-        i = i + 1
-    }
-    emit_ok("{\"count\":" + str(n) + ",\"mode\":\"" + mode + "\"}")
+    emit_ok(q_count(flag_get(fs, "where")))
 }
 
 func cmd_index(fs) {
@@ -195,74 +76,11 @@ func cmd_indexes(fs) {
     emit_ok("{\"indexes\":[" + join(items, ",") + "]}")
 }
 
-func agg_group(gtok, n, sf, sums) (item) {
-    item = "{\"value\":" + gtok + ",\"count\":" + str(n)
-    j := 0
-    while j < len(sf) {
-        s := sums[gtok + "\t" + sf[j]]
-        item = item + ",\"sum_" + sf[j] + "\":" + ix_fstr(s)
-        if n > 0 { item = item + ",\"avg_" + sf[j] + "\":" + ix_fstr(s / float(n)) }
-        j = j + 1
-    }
-    item = item + "}"
-}
-
 func cmd_agg(fs) {
     f := flag_get(fs, "group-by")
     if len(f) == 0 { emit_err(81, "input", "missing --group-by", 1, "pass --group-by <field>") }
     do_open(fs)
-    sumspec := flag_get(fs, "sum")
-    sf := []string{}
-    if len(sumspec) > 0 { sf = split(sumspec, ",") }
-    // indexed fast path: registers already hold count+sums per group
-    if ix_is_indexed(f) == 1 && (len(sumspec) == 0 || contains("," + g_isums[f] + ",", "," + sumspec + ",") || g_isums[f] == sumspec) {
-        pre := f + "\t"
-        gsums := make(map[string]float)
-        bks := keys(g_bcount)
-        items := []string{}
-        i := 0
-        while i < len(bks) {
-            if has_prefix(bks[i], pre) && g_bcount[bks[i]] > 0 {
-                gtok := substr(bks[i], len(pre), len(bks[i]))
-                j := 0
-                while j < len(sf) {
-                    gsums[gtok + "\t" + sf[j]] = g_breg[bks[i] + "\t" + sf[j]]
-                    j = j + 1
-                }
-                items = append(items, agg_group(gtok, g_bcount[bks[i]], sf, gsums))
-            }
-            i = i + 1
-        }
-        emit_ok("{\"group_by\":\"" + jesc(f) + "\",\"mode\":\"indexed\",\"groups\":[" + join(items, ",") + "]}")
-        return
-    }
-    // scan path
-    gcount := make(map[string]int)
-    gsums := make(map[string]float)
-    ids := keys(g_mem)
-    i := 0
-    while i < len(ids) {
-        doc := g_mem[ids[i]]
-        gtok := ix_field_tok(doc, f)
-        if len(gtok) > 0 {
-            gcount[gtok] = gcount[gtok] + 1
-            j := 0
-            while j < len(sf) {
-                stok := ix_field_tok(doc, sf[j])
-                if len(stok) > 0 { gsums[gtok + "\t" + sf[j]] = gsums[gtok + "\t" + sf[j]] + ix_tok_num(stok) }
-                j = j + 1
-            }
-        }
-        i = i + 1
-    }
-    gtoks := keys(gcount)
-    items := []string{}
-    i = 0
-    while i < len(gtoks) {
-        items = append(items, agg_group(gtoks[i], gcount[gtoks[i]], sf, gsums))
-        i = i + 1
-    }
-    emit_ok("{\"group_by\":\"" + jesc(f) + "\",\"mode\":\"scan\",\"groups\":[" + join(items, ",") + "]}")
+    emit_ok(q_agg(f, flag_get(fs, "sum")))
 }
 
 func cmd_compact(fs) {
@@ -317,6 +135,8 @@ func main() {
     fs = flag_str(fs, "field", "f", "", "index: field to index")
     fs = flag_str(fs, "sums", "s", "", "index: comma-separated numeric fields to keep sum registers for")
     fs = flag_str(fs, "group-by", "g", "", "agg: field to group by")
+    fs = flag_int(fs, "port", "p", "4444", "serve: HTTP port")
+    fs = flag_str(fs, "token", "t", "", "serve: bearer token (default GRANGE_TOKEN or generated)")
     fs = flag_str(fs, "sum", "u", "", "agg: comma-separated numeric fields to sum/avg")
     fs = parse_flags(fs, args())
     rest := flag_args(fs)
@@ -335,6 +155,7 @@ func main() {
     if verb == "indexes" { cmd_indexes(fs)  return }
     if verb == "agg" { cmd_agg(fs)  return }
     if verb == "stats" { cmd_stats(fs)  return }
+    if verb == "serve" { cmd_serve(fs)  return }
     if verb == "bench" { cmd_bench(fs)  return }
     if verb == "torture" { cmd_torture(fs)  return }
     if verb == "guide" { cmd_guide()  return }
