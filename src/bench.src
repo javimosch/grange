@@ -1,0 +1,133 @@
+// grange bench — the 100k-record gate, run in-repo, JSON out.
+// Phases: bulk insert (batched commits) · point gets · filtered scan ·
+// compact · cold reopen · integrity. Optional --vs-sqlite comparison.
+
+func bench_rand(n) (v) {
+    rb := rand_bytes(4)
+    v = byte_at(rb, 0) + byte_at(rb, 1) * 256 + byte_at(rb, 2) * 65536
+    v = v % n
+    if v < 0 { v = 0 - v }
+}
+
+func bench_status(i) (s) {
+    r := i % 3
+    s = "active"
+    if r == 1 { s = "paused" }
+    if r == 2 { s = "done" }
+}
+
+func bench_doc(i) (d) {
+    d = "{\"i\":" + str(i) + ",\"status\":\"" + bench_status(i) + "\",\"name\":\"user-" + str(i) + "\",\"score\":" + str(i % 1000) + "}"
+}
+
+func bench_rss_kb() (kb) {
+    // /proc files stat as size 0, so read_file returns "" — go through the shell
+    kb = 0
+    code, out, errout := exec("awk '/VmRSS/{print $2}' /proc/$PPID/status")
+    if code == 0 { kb = parse_int(trim(out)) }
+}
+
+func bench_grange(db, n, batch) (out) {
+    // 1) bulk insert
+    t0 := now_ms()
+    ok, errmsg := gr_open(db, "bench")
+    i := 0
+    while i < n {
+        gr_put("k" + str(i), bench_doc(i))
+        if (i + 1) % batch == 0 { gr_commit() }
+        i = i + 1
+    }
+    gr_commit()
+    t_insert := now_ms() - t0
+    // 2) point gets: 1000 random ids
+    t0 = now_ms()
+    hits := 0
+    i = 0
+    while i < 1000 {
+        doc, found := gr_get("k" + str(bench_rand(n)))
+        hits = hits + found
+        i = i + 1
+    }
+    t_get := now_ms() - t0
+    // 3) filtered scan: status=paused over everything
+    t0 = now_ms()
+    fields := []string{"status"}
+    vals := []string{"paused"}
+    ids := keys(g_mem)
+    matches := 0
+    i = 0
+    while i < len(ids) {
+        if wh_match(g_mem[ids[i]], fields, vals) == 1 { matches = matches + 1 }
+        i = i + 1
+    }
+    t_scan := now_ms() - t0
+    // 4) compact
+    t0 = now_ms()
+    gr_compact()
+    t_compact := now_ms() - t0
+    // 5) cold reopen from the compacted segment
+    t0 = now_ms()
+    ok, errmsg = gr_open(db, "bench")
+    t_open := now_ms() - t0
+    // 6) integrity
+    final := gr_count()
+    ins_rate := 0
+    if t_insert > 0 { ins_rate = n * 1000 / t_insert }
+    out = "{\"n\":" + str(n) + ",\"insert_ms\":" + str(t_insert) + ",\"insert_per_s\":" + str(ins_rate) + ",\"point_get_1000_ms\":" + str(t_get) + ",\"point_get_hits\":" + str(hits) + ",\"scan_ms\":" + str(t_scan) + ",\"scan_matches\":" + str(matches) + ",\"compact_ms\":" + str(t_compact) + ",\"cold_open_ms\":" + str(t_open) + ",\"final_count\":" + str(final) + ",\"integrity\":" + str(final == n) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}"
+}
+
+func bench_sqlite(path, n, batch) (out) {
+    remove(path)
+    h := sqlite_open(path)
+    sqlite_exec(h, "CREATE TABLE docs (id TEXT PRIMARY KEY, i INT, status TEXT, name TEXT, score INT)")
+    t0 := now_ms()
+    sqlite_exec(h, "BEGIN")
+    i := 0
+    while i < n {
+        sqlite_exec(h, "INSERT INTO docs VALUES (?, ?, ?, ?, ?)", []string{"k" + str(i), str(i), bench_status(i), "user-" + str(i), str(i % 1000)})
+        if (i + 1) % batch == 0 {
+            sqlite_exec(h, "COMMIT")
+            sqlite_exec(h, "BEGIN")
+        }
+        i = i + 1
+    }
+    sqlite_exec(h, "COMMIT")
+    t_insert := now_ms() - t0
+    t0 = now_ms()
+    i = 0
+    while i < 1000 {
+        sqlite_query(h, "SELECT i, status FROM docs WHERE id = ?", []string{"k" + str(bench_rand(n))})
+        i = i + 1
+    }
+    t_get := now_ms() - t0
+    t0 = now_ms()
+    rows := sqlite_query(h, "SELECT COUNT(*) AS c FROM docs WHERE status = ?", []string{"paused"})
+    t_scan := now_ms() - t0
+    c, cerr := json_get(rows, "[0].c")
+    sqlite_close(h)
+    ins_rate := 0
+    if t_insert > 0 { ins_rate = n * 1000 / t_insert }
+    out = "{\"n\":" + str(n) + ",\"insert_ms\":" + str(t_insert) + ",\"insert_per_s\":" + str(ins_rate) + ",\"point_get_1000_ms\":" + str(t_get) + ",\"scan_ms\":" + str(t_scan) + ",\"scan_matches\":" + c + "}"
+}
+
+func cmd_bench(fs) {
+    db := flag_get(fs, "db")
+    if len(db) == 0 { db = "/tmp/grange-bench" }
+    n := flag_int_val(fs, "n")
+    batch := flag_int_val(fs, "batch")
+    if batch < 1 { batch = 1000 }
+    // fresh run: clear previous bench collection
+    old := list_dir(db + "/bench")
+    i := 0
+    while i < len(old) {
+        remove(db + "/bench/" + old[i])
+        i = i + 1
+    }
+    g := bench_grange(db, n, batch)
+    if flag_on(fs, "vs-sqlite") {
+        s := bench_sqlite(db + "/bench.sqlite", n, batch)
+        emit_ok("{\"grange\":" + g + ",\"sqlite\":" + s + "}")
+        return
+    }
+    emit_ok("{\"grange\":" + g + "}")
+}

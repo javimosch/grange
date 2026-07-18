@@ -1,0 +1,224 @@
+// grange CLI — agent-first surface per https://cli-specs.intrane.fr/
+//   stdout = the answer, JSON only. stderr = typed errors / context.
+//   exit codes: 0 ok · 80-89 input · 90-99 resource · 110-119 internal.
+//
+// Verbs: put get del find count compact stats bench torture guide help-json
+
+// ---- output helpers ----
+
+func jesc(s) (out) {
+    out = replace(s, "\\", "\\\\")
+    out = replace(out, "\"", "\\\"")
+    out = replace(out, "\n", "\\n")
+    out = replace(out, "\t", "\\t")
+}
+
+func emit_ok(dataJson) {
+    println("{\"ok\":true,\"data\":" + dataJson + "}")
+}
+
+func emit_err(code, etype, msg, recoverable, suggestion) {
+    rec := "false"
+    if recoverable == 1 { rec = "true" }
+    write(2, "{\"ok\":false,\"error\":{\"type\":\"" + etype + "\",\"message\":\"" + jesc(msg) + "\",\"recoverable\":" + rec + ",\"suggestions\":[\"" + jesc(suggestion) + "\"]}}\n")
+    exit(code)
+}
+
+// ---- doc / id validation ----
+
+func valid_id(id) (ok) {
+    ok = 0
+    if len(id) == 0 { return }
+    if contains(id, "|") { return }
+    if contains(id, "\n") { return }
+    if contains(id, "/") { return }
+    ok = 1
+}
+
+func valid_doc(doc) (ok) {
+    ok = 0
+    if len(doc) == 0 { return }
+    if contains(doc, "\n") { return }
+    first := charat(doc, 0)
+    if first != "{" && first != "[" { return }
+    ok = 1
+}
+
+// ---- filter matching: --where "field=value,field2=value2" (equality, AND) ----
+
+func wh_pairs(wh) (fields, vals) {
+    fields = []string{}
+    vals = []string{}
+    if len(wh) == 0 { return }
+    parts := split(wh, ",")
+    i := 0
+    while i < len(parts) {
+        eq := index(parts[i], "=")
+        if eq > 0 {
+            fields = append(fields, substr(parts[i], 0, eq))
+            vals = append(vals, substr(parts[i], eq + 1, len(parts[i])))
+        }
+        i = i + 1
+    }
+}
+
+func wh_match(doc, fields, vals) (m) {
+    m = 1
+    i := 0
+    while i < len(fields) {
+        got, err := json_get(doc, "." + fields[i])
+        if len(err) > 0 { m = 0  return }
+        if got != vals[i] && got != "\"" + vals[i] + "\"" { m = 0  return }
+        i = i + 1
+    }
+}
+
+// ---- verbs ----
+
+func need_db(fs) (db) {
+    db = flag_get(fs, "db")
+    if len(db) == 0 { emit_err(81, "input", "missing --db <dir>", 1, "pass --db pointing at the database directory") }
+}
+
+func do_open(fs) {
+    ok, errmsg := gr_open(need_db(fs), flag_get(fs, "coll"))
+    if ok == 0 { emit_err(110, "internal", "open failed: " + errmsg, 0, "check the --db directory is readable/writable") }
+}
+
+func cmd_put(fs) {
+    doc := flag_get(fs, "doc")
+    if valid_doc(doc) == 0 { emit_err(82, "input", "--doc must be single-line minified JSON starting with { or [", 1, "minify the JSON (no raw newlines) and retry") }
+    id := flag_get(fs, "id")
+    if len(id) == 0 { id = to_hex(rand_bytes(8)) }
+    if valid_id(id) == 0 { emit_err(82, "input", "invalid --id (no | / newline, non-empty)", 1, "use a simple token id or omit --id for an auto id") }
+    do_open(fs)
+    gr_put(id, doc)
+    if gr_commit() == 0 { emit_err(111, "internal", "wal chunk write failed", 0, "check disk space and permissions") }
+    emit_ok("{\"id\":\"" + jesc(id) + "\"}")
+}
+
+func cmd_get(fs) {
+    id := flag_get(fs, "id")
+    if len(id) == 0 { emit_err(81, "input", "missing --id", 1, "pass --id of the document") }
+    do_open(fs)
+    doc, found := gr_get(id)
+    if found == 0 { emit_err(90, "not-found", "no document with id " + id, 1, "check the id with: grange find") }
+    emit_ok("{\"id\":\"" + jesc(id) + "\",\"doc\":" + doc + "}")
+}
+
+func cmd_del(fs) {
+    id := flag_get(fs, "id")
+    if len(id) == 0 { emit_err(81, "input", "missing --id", 1, "pass --id of the document") }
+    do_open(fs)
+    existed := gr_del(id)
+    if existed == 0 { emit_err(90, "not-found", "no document with id " + id, 1, "nothing to delete") }
+    if gr_commit() == 0 { emit_err(111, "internal", "wal chunk write failed", 0, "check disk space and permissions") }
+    emit_ok("{\"id\":\"" + jesc(id) + "\",\"deleted\":true}")
+}
+
+func cmd_find(fs) {
+    do_open(fs)
+    fields, vals := wh_pairs(flag_get(fs, "where"))
+    limit := flag_int_val(fs, "limit")
+    ids := keys(g_mem)
+    items := []string{}
+    n := 0
+    i := 0
+    while i < len(ids) {
+        if n >= limit { break }
+        doc := g_mem[ids[i]]
+        if wh_match(doc, fields, vals) == 1 {
+            items = append(items, "{\"id\":\"" + jesc(ids[i]) + "\",\"doc\":" + doc + "}")
+            n = n + 1
+        }
+        i = i + 1
+    }
+    emit_ok("{\"count\":" + str(n) + ",\"items\":[" + join(items, ",") + "]}")
+}
+
+func cmd_count(fs) {
+    do_open(fs)
+    fields, vals := wh_pairs(flag_get(fs, "where"))
+    if len(fields) == 0 {
+        emit_ok("{\"count\":" + str(gr_count()) + "}")
+        return
+    }
+    ids := keys(g_mem)
+    n := 0
+    i := 0
+    while i < len(ids) {
+        if wh_match(g_mem[ids[i]], fields, vals) == 1 { n = n + 1 }
+        i = i + 1
+    }
+    emit_ok("{\"count\":" + str(n) + "}")
+}
+
+func cmd_compact(fs) {
+    do_open(fs)
+    before := g_replayed_chunks
+    if gr_compact() == 0 { emit_err(112, "internal", "compaction failed (segment write/verify)", 0, "check disk space; old files were NOT deleted") }
+    emit_ok("{\"gen\":" + str(g_gen) + ",\"docs\":" + str(gr_count()) + ",\"chunks_merged\":" + str(before) + "}")
+}
+
+func cmd_stats(fs) {
+    do_open(fs)
+    emit_ok("{\"docs\":" + str(gr_count()) + ",\"gen\":" + str(g_gen) + ",\"chunks_replayed\":" + str(g_replayed_chunks) + ",\"chunks_skipped\":" + str(g_skipped_chunks) + ",\"next_chunk\":" + str(g_next_chunk) + "}")
+}
+
+// torture: crash-test writer — puts docs in small commits until killed.
+func cmd_torture(fs) {
+    do_open(fs)
+    n := flag_int_val(fs, "n")
+    batch := flag_int_val(fs, "batch")
+    if batch < 1 { batch = 100 }
+    i := 0
+    while i < n {
+        gr_put("t" + str(i), "{\"i\":" + str(i) + "}")
+        if (i + 1) % batch == 0 {
+            if gr_commit() == 0 { emit_err(111, "internal", "wal write failed", 0, "disk") }
+        }
+        i = i + 1
+    }
+    gr_commit()
+    emit_ok("{\"written\":" + str(n) + "}")
+}
+
+func cmd_guide() {
+    println("{\"tool\":\"grange\",\"version\":\"0.1.0\",\"model\":\"document store: collections of minified-JSON docs keyed by id. Writes stage in memory and become durable at commit (one immutable checksummed WAL chunk per commit). Recovery replays the newest valid segment + its valid chunks; a torn last chunk is dropped (all-or-nothing per commit). compact folds everything into a fresh segment.\",\"loop\":[\"put --db d --doc '{...}' -> {id}\",\"get --db d --id X\",\"find --db d --where status=active --limit 50\",\"del --db d --id X\",\"compact --db d (fold WAL chunks into a segment; run when stats.chunks_replayed grows)\"],\"concepts\":{\"db\":\"a directory; --coll names a sub-collection (default: default)\",\"where\":\"comma-separated field=value equality, ANDed; matches string/number/bool top-level fields\",\"durability\":\"per-commit chunk files with sha256 trailers; no fsync builtin yet — OS-crash durability is best-effort, process-crash durability is exact\"},\"edge_cases\":[\"docs must be single-line minified JSON\",\"ids: no | / newline or slash\",\"where values containing , or = are not expressible in M0 — use get by id\"],\"exit_codes\":{\"0\":\"ok\",\"80-89\":\"input\",\"90-99\":\"not found\",\"110-119\":\"internal\"}}")
+}
+
+func cmd_help_json() {
+    println("{\"tool\":\"grange\",\"version\":\"0.1.0\",\"summary\":\"machin-native embedded document database — agent-first, single binary\",\"commands\":[{\"name\":\"put\",\"flags\":[\"--db\",\"--coll\",\"--id\",\"--doc\"],\"out\":\"{id}\"},{\"name\":\"get\",\"flags\":[\"--db\",\"--coll\",\"--id\"],\"out\":\"{id,doc}\"},{\"name\":\"del\",\"flags\":[\"--db\",\"--coll\",\"--id\"],\"out\":\"{id,deleted}\"},{\"name\":\"find\",\"flags\":[\"--db\",\"--coll\",\"--where\",\"--limit\"],\"out\":\"{count,items}\"},{\"name\":\"count\",\"flags\":[\"--db\",\"--coll\",\"--where\"],\"out\":\"{count}\"},{\"name\":\"compact\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{gen,docs}\"},{\"name\":\"stats\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{docs,gen,chunks_replayed,chunks_skipped}\"},{\"name\":\"bench\",\"flags\":[\"--db\",\"--n\",\"--vs-sqlite\"],\"out\":\"benchmark metrics\"},{\"name\":\"guide\",\"flags\":[],\"out\":\"operator manual\"}]}")
+}
+
+func main() {
+    fs := new_flags("grange")
+    fs = flag_str(fs, "db", "d", "", "database directory")
+    fs = flag_str(fs, "coll", "c", "default", "collection name")
+    fs = flag_str(fs, "id", "i", "", "document id")
+    fs = flag_str(fs, "doc", "D", "", "document body (minified JSON)")
+    fs = flag_str(fs, "where", "w", "", "filter: field=value[,field=value] equality, ANDed")
+    fs = flag_int(fs, "limit", "l", "100", "max results for find")
+    fs = flag_int(fs, "n", "n", "100000", "bench/torture record count")
+    fs = flag_int(fs, "batch", "b", "1000", "commit batch size")
+    fs = flag_bool(fs, "vs-sqlite", "S", "bench: also run the same workload on the SQLite builtin")
+    fs = parse_flags(fs, args())
+    rest := flag_args(fs)
+    if len(rest) == 0 {
+        if flag_on(fs, "help") { println(flag_usage(fs))  return }
+        emit_err(80, "input", "missing verb", 1, "run: grange help-json")
+    }
+    verb := rest[0]
+    if verb == "put" { cmd_put(fs)  return }
+    if verb == "get" { cmd_get(fs)  return }
+    if verb == "del" { cmd_del(fs)  return }
+    if verb == "find" { cmd_find(fs)  return }
+    if verb == "count" { cmd_count(fs)  return }
+    if verb == "compact" { cmd_compact(fs)  return }
+    if verb == "stats" { cmd_stats(fs)  return }
+    if verb == "bench" { cmd_bench(fs)  return }
+    if verb == "torture" { cmd_torture(fs)  return }
+    if verb == "guide" { cmd_guide()  return }
+    if verb == "help-json" { cmd_help_json()  return }
+    emit_err(80, "input", "unknown verb: " + verb, 1, "run: grange help-json")
+}

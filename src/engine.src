@@ -1,0 +1,285 @@
+// grange engine — M0 storage core.
+//
+// On-disk layout, one directory per collection:
+//   <db>/<coll>/seg-<gen>.grg        immutable compacted snapshot (generation gen)
+//   <db>/<coll>/wal-<gen>-<n>.grg    immutable WAL chunk n under generation gen
+//
+// A .grg record file is text lines:
+//   "p|<id>"  followed by one line of minified JSON (the doc)
+//   "d|<id>"  a tombstone
+//   final line "#|<nrecs>|<sha12>"   trailer: record count + sha256[:12] of body
+//
+// A file is valid iff its trailer verifies. Files are written exactly once
+// (MFL has no append/rename), so a crash can only leave a truncated LAST
+// chunk — recovery drops invalid chunks and keeps the committed prefix.
+//
+// Recovery: pick the highest generation with a valid segment, load it,
+// replay that generation's valid chunks in ascending order.
+// Compaction: write seg-(gen+1) from memory, then delete older .grg files.
+
+var g_db = ""
+var g_coll = ""
+var g_mem = make(map[string]string)
+var g_gen = 0
+var g_next_chunk = 0
+var g_pend = []string{}
+var g_pend_recs = 0
+var g_skipped_chunks = 0
+var g_replayed_chunks = 0
+
+func gr_dir() (p) {
+    p = g_db + "/" + g_coll
+}
+
+func gr_pad6(n) (s) {
+    s = str(n)
+    while len(s) < 6 { s = "0" + s }
+}
+
+func gr_chk(body) (c) {
+    c = substr(sha256(body), 0, 12)
+}
+
+// gr_write_recfile writes lines + trailer to path. Returns 1 on success.
+func gr_write_recfile(path, lines, nrecs) (ok) {
+    ok = 0
+    body := join(lines, "\n")
+    full := body + "\n#|" + str(nrecs) + "|" + gr_chk(body) + "\n"
+    if len(lines) == 0 { full = "#|0|" + gr_chk("") + "\n" }
+    if write_file(path, full) < 0 { return }
+    ok = 1
+}
+
+// gr_load_recfile reads and verifies a record file.
+// Returns (lines-without-trailer, nrecs, ok).
+func gr_load_recfile(path) (lines, nrecs, ok) {
+    lines = []string{}
+    nrecs = 0
+    ok = 0
+    content := read_file(path)
+    if len(content) == 0 { return }
+    raw := split(content, "\n")
+    m := len(raw)
+    if m > 0 && raw[m-1] == "" { m = m - 1 }
+    if m < 1 { return }
+    trailer := raw[m-1]
+    if has_prefix(trailer, "#|") == false { return }
+    parts := split(trailer, "|")
+    if len(parts) != 3 { return }
+    want_recs := parse_int(parts[1])
+    i := 0
+    while i < m-1 {
+        lines = append(lines, raw[i])
+        i = i + 1
+    }
+    body := join(lines, "\n")
+    if gr_chk(body) != parts[2] { return }
+    nrecs = want_recs
+    ok = 1
+}
+
+// gr_apply_lines replays record lines into the memtable. Returns records applied,
+// or -1 on a structurally corrupt stream (should not happen once checksum passed).
+func gr_apply_lines(lines) (recs) {
+    recs = 0
+    i := 0
+    n := len(lines)
+    while i < n {
+        ln := lines[i]
+        if has_prefix(ln, "p|") {
+            if i + 1 >= n { recs = -1  return }
+            id := substr(ln, 2, len(ln))
+            g_mem[id] = lines[i+1]
+            i = i + 2
+            recs = recs + 1
+        } else if has_prefix(ln, "d|") {
+            id := substr(ln, 2, len(ln))
+            delete(g_mem, id)
+            i = i + 1
+            recs = recs + 1
+        } else {
+            recs = -1
+            return
+        }
+    }
+}
+
+// gr_sort_ints — ascending insertion sort (chunk/gen lists are small).
+func gr_sort_ints(xs) (out) {
+    out = []int{}
+    n := len(xs)
+    i := 0
+    while i < n {
+        v := xs[i]
+        // find insert position in out
+        m := len(out)
+        pos := m
+        j := 0
+        while j < m {
+            if xs[i] < out[j] { pos = j  break }
+            j = j + 1
+        }
+        // rebuild with v inserted at pos
+        nw := []int{}
+        j = 0
+        while j < m {
+            if j == pos { nw = append(nw, v) }
+            nw = append(nw, out[j])
+            j = j + 1
+        }
+        if pos == m { nw = append(nw, v) }
+        out = nw
+        i = i + 1
+    }
+}
+
+// gr_open opens (or creates) db/coll and recovers state. Returns (ok, errmsg).
+func gr_open(db, coll) (ok, errmsg) {
+    ok = 0
+    errmsg = ""
+    g_db = db
+    g_coll = coll
+    g_mem = make(map[string]string)
+    g_gen = 0
+    g_next_chunk = 0
+    g_pend = []string{}
+    g_pend_recs = 0
+    g_skipped_chunks = 0
+    g_replayed_chunks = 0
+    mkdir(db)
+    mkdir(gr_dir())
+    entries := list_dir(gr_dir())
+    if len(entries) == 0 {
+        // brand-new collection (or unreadable dir; mkdir above covers create)
+        ok = 1
+        return
+    }
+    // collect segment generations
+    gens := []int{}
+    i := 0
+    while i < len(entries) {
+        e := entries[i]
+        if has_prefix(e, "seg-") && has_suffix(e, ".grg") {
+            gens = append(gens, parse_int(substr(e, 4, len(e)-4)))
+        }
+        i = i + 1
+    }
+    gens = gr_sort_ints(gens)
+    // load the highest valid segment
+    gi := len(gens) - 1
+    while gi >= 0 {
+        lines, nrecs, sok := gr_load_recfile(gr_dir() + "/seg-" + gr_pad6(gens[gi]) + ".grg")
+        if sok == 1 {
+            if gr_apply_lines(lines) >= 0 {
+                g_gen = gens[gi]
+                break
+            }
+        }
+        g_mem = make(map[string]string)
+        gi = gi - 1
+    }
+    // replay this generation's chunks in ascending order
+    pre := "wal-" + gr_pad6(g_gen) + "-"
+    chunks := []int{}
+    i = 0
+    while i < len(entries) {
+        e := entries[i]
+        if has_prefix(e, pre) && has_suffix(e, ".grg") {
+            chunks = append(chunks, parse_int(substr(e, len(pre), len(e)-4)))
+        }
+        i = i + 1
+    }
+    chunks = gr_sort_ints(chunks)
+    i = 0
+    while i < len(chunks) {
+        cn := chunks[i]
+        lines, nrecs, cok := gr_load_recfile(gr_dir() + "/wal-" + gr_pad6(g_gen) + "-" + gr_pad6(cn) + ".grg")
+        applied := -1
+        if cok == 1 { applied = gr_apply_lines(lines) }
+        if applied >= 0 {
+            g_replayed_chunks = g_replayed_chunks + 1
+        } else {
+            g_skipped_chunks = g_skipped_chunks + 1
+        }
+        if cn >= g_next_chunk { g_next_chunk = cn + 1 }
+        i = i + 1
+    }
+    ok = 1
+}
+
+// gr_put stages a write (visible immediately; durable at gr_commit).
+func gr_put(id, doc) {
+    g_mem[id] = doc
+    g_pend = append(g_pend, "p|" + id)
+    g_pend = append(g_pend, doc)
+    g_pend_recs = g_pend_recs + 1
+}
+
+// gr_del stages a delete. Returns 1 if the id existed.
+func gr_del(id) (existed) {
+    existed = 0
+    if has(g_mem, id) { existed = 1 }
+    delete(g_mem, id)
+    g_pend = append(g_pend, "d|" + id)
+    g_pend_recs = g_pend_recs + 1
+}
+
+// gr_commit makes staged writes durable as one WAL chunk. Returns 1 on success.
+func gr_commit() (ok) {
+    ok = 1
+    if g_pend_recs == 0 { return }
+    path := gr_dir() + "/wal-" + gr_pad6(g_gen) + "-" + gr_pad6(g_next_chunk) + ".grg"
+    ok = gr_write_recfile(path, g_pend, g_pend_recs)
+    if ok == 1 {
+        g_next_chunk = g_next_chunk + 1
+        g_pend = []string{}
+        g_pend_recs = 0
+    }
+}
+
+func gr_get(id) (doc, found) {
+    doc = ""
+    found = 0
+    if has(g_mem, id) {
+        doc = g_mem[id]
+        found = 1
+    }
+}
+
+func gr_count() (n) {
+    n = len(keys(g_mem))
+}
+
+// gr_compact writes a fresh segment at gen+1 and removes older files.
+// Returns 1 on success.
+func gr_compact() (ok) {
+    ok = 0
+    if gr_commit() == 0 { return }
+    newgen := g_gen + 1
+    ids := keys(g_mem)
+    lines := []string{}
+    i := 0
+    while i < len(ids) {
+        lines = append(lines, "p|" + ids[i])
+        lines = append(lines, g_mem[ids[i]])
+        i = i + 1
+    }
+    segname := "seg-" + gr_pad6(newgen) + ".grg"
+    if gr_write_recfile(gr_dir() + "/" + segname, lines, len(ids)) == 0 { return }
+    // verify the new segment reads back before deleting anything
+    vlines, vrecs, vok := gr_load_recfile(gr_dir() + "/" + segname)
+    if vok == 0 { return }
+    if vrecs != len(ids) { return }
+    entries := list_dir(gr_dir())
+    i = 0
+    while i < len(entries) {
+        e := entries[i]
+        if has_suffix(e, ".grg") && e != segname {
+            remove(gr_dir() + "/" + e)
+        }
+        i = i + 1
+    }
+    g_gen = newgen
+    g_next_chunk = 0
+    ok = 1
+}

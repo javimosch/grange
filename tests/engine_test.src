@@ -1,0 +1,66 @@
+// grange engine tests — run: machin test src/engine.src tests/engine_test.src
+
+func tdir() (d) {
+    d = "/tmp/grange-test-" + str(now_ms())
+}
+
+func main() {
+    db := tdir()
+
+    // put/get/commit
+    ok, errmsg := gr_open(db, "t")
+    assert(ok == 1, "open fresh db")
+    gr_put("a", "{\"x\":1}")
+    gr_put("b", "{\"x\":2}")
+    assert(gr_commit() == 1, "commit chunk")
+    doc, found := gr_get("a")
+    assert_eq_int(found, 1, "get a found")
+    assert_eq_str(doc, "{\"x\":1}", "get a doc")
+    assert_eq_int(gr_count(), 2, "count 2")
+
+    // durability: reopen replays the chunk
+    ok, errmsg = gr_open(db, "t")
+    assert_eq_int(gr_count(), 2, "reopen count 2")
+    assert_eq_int(g_replayed_chunks, 1, "one chunk replayed")
+
+    // overwrite latest-wins + delete
+    gr_put("a", "{\"x\":9}")
+    gr_del("b")
+    gr_commit()
+    ok, errmsg = gr_open(db, "t")
+    doc, found = gr_get("a")
+    assert_eq_str(doc, "{\"x\":9}", "overwrite wins after replay")
+    doc, found = gr_get("b")
+    assert_eq_int(found, 0, "tombstone applied after replay")
+    assert_eq_int(gr_count(), 1, "count 1 after del")
+
+    // compact folds chunks into a segment, state survives
+    assert(gr_compact() == 1, "compact")
+    assert_eq_int(g_gen, 1, "gen bumped")
+    ok, errmsg = gr_open(db, "t")
+    assert_eq_int(gr_count(), 1, "count 1 after compact+reopen")
+    assert_eq_int(g_replayed_chunks, 0, "no chunks after compact")
+    doc, found = gr_get("a")
+    assert_eq_str(doc, "{\"x\":9}", "doc survives compaction")
+
+    // corrupt (torn) chunk is skipped, committed prefix survives
+    gr_put("c", "{\"x\":3}")
+    gr_commit()
+    write_file(db + "/t/wal-" + gr_pad6(g_gen) + "-" + gr_pad6(g_next_chunk) + ".grg", "p|zz\n{\"x\":99}\n#|1|badbadbadbad\n")
+    ok, errmsg = gr_open(db, "t")
+    assert_eq_int(g_skipped_chunks, 1, "torn chunk skipped")
+    assert_eq_int(gr_count(), 2, "committed prefix intact")
+    doc, found = gr_get("zz")
+    assert_eq_int(found, 0, "torn write not applied")
+    // writes continue past the skipped chunk number
+    gr_put("d", "{\"x\":4}")
+    assert(gr_commit() == 1, "commit after torn chunk")
+    ok, errmsg = gr_open(db, "t")
+    assert_eq_int(gr_count(), 3, "write-after-corruption durable")
+
+    // fresh collection in same db is isolated
+    ok, errmsg = gr_open(db, "other")
+    assert_eq_int(gr_count(), 0, "collections isolated")
+
+    test_summary()
+}
