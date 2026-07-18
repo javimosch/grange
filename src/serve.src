@@ -25,11 +25,19 @@ func srv_ok(data) (res) {
     res = srv_json("200 OK", "{\"ok\":true,\"data\":" + data + "}")
 }
 
-func srv_authed(req) (yes) {
-    yes = 0
+// srv_role resolves the caller: ("admin","") | ("tenant",tid) | ("","").
+func srv_role(req) (role, tid) {
+    role = ""
+    tid = ""
+    tok := query(req, "token")
     h := header(req, "authorization")
-    if h == "Bearer " + g_srv_token { yes = 1  return }
-    if query(req, "token") == g_srv_token { yes = 1 }
+    if has_prefix(h, "Bearer ") { tok = substr(h, 7, len(h)) }
+    if len(tok) == 0 { return }
+    if tok == g_srv_token { role = "admin"  return }
+    if has(g_tenants, tok) {
+        role = "tenant"
+        tid = g_tenants[tok]
+    }
 }
 
 // srv_body_field pulls a raw JSON token out of the request body ("" if absent).
@@ -46,14 +54,15 @@ func srv_body_str(req, f) (s) {
 }
 
 // srv_coll resolves the request's collection (?coll= or body "coll"),
-// defaulting to "default", and switches the engine to it.
-func srv_use(req) (ok) {
+// defaulting to "default", and switches the engine to it under `root`.
+func srv_use(req, root) (ok) {
     c := query(req, "coll")
     if len(c) == 0 { c = srv_body_str(req, "coll") }
     if len(c) == 0 { c = "default" }
     ok = 0
     if valid_id(c) == 0 { return }
-    uok, uerr := gr_use(g_srv_db, c)
+    if c == "_sys" { return }
+    uok, uerr := gr_use(root, c)
     ok = uok
 }
 
@@ -62,12 +71,42 @@ func srv_handle(req) (res) {
         res = srv_ok("{\"docs\":" + str(gr_count()) + "}")
         return
     }
-    if srv_authed(req) == 0 {
-        res = srv_err("401 Unauthorized", "auth", "missing or wrong bearer token")
+    // self-serve tenant signup: a peage wallet is the only credential
+    if req.method == "POST" && req.path == "/tenants" {
+        w := header(req, "x-peage-wallet")
+        if has_prefix(w, "pw_") == false {
+            res = srv_err("400 Bad Request", "input", "send X-Peage-Wallet: pw_... (mint one: POST " + tn_peage_url() + "/v1/wallets — see /llms.txt of peage)")
+            return
+        }
+        tid, ttok := tn_create(w, srv_body_str(req, "name"))
+        res = srv_ok("{\"tenant\":\"" + tid + "\",\"token\":\"" + ttok + "\",\"pricing\":{\"storage_cents_per_gb_month\":" + str(tn_price()) + ",\"free_bytes\":" + str(tn_free_bytes()) + ",\"pay_rail\":\"peage\"},\"how\":\"use Authorization: Bearer " + ttok + " on /put /get /find /count /agg /index /stats /usage — your data is isolated and metered by disk bytes\"}")
+        return
+    }
+    role, tid := srv_role(req)
+    if len(role) == 0 {
+        res = srv_err("401 Unauthorized", "auth", "missing or wrong bearer token (tenants self-serve at POST /tenants with X-Peage-Wallet)")
+        return
+    }
+    tn_sweep()
+    root := g_srv_db
+    if role == "tenant" { root = tn_root(tid) }
+    if req.method == "GET" && has_prefix(req.path, "/usage") {
+        utid := tid
+        if role == "admin" { utid = query(req, "tenant") }
+        if len(utid) == 0 {
+            res = srv_err("400 Bad Request", "input", "admin usage needs ?tenant=<tid>")
+            return
+        }
+        res = srv_ok(tn_usage(utid))
+        return
+    }
+    if role == "admin" && req.method == "GET" && has_prefix(req.path, "/tenants") {
+        ok2, errmsg2 := gr_use(g_srv_db, "_sys")
+        res = srv_ok(q_find("", 1000))
         return
     }
     if req.method == "GET" && has_prefix(req.path, "/collections") {
-        entries := list_dir(g_srv_db)
+        entries := list_dir(root)
         items := []string{}
         i := 0
         while i < len(entries) {
@@ -79,7 +118,11 @@ func srv_handle(req) (res) {
         res = srv_ok("{\"collections\":[" + join(items, ",") + "]}")
         return
     }
-    if srv_use(req) == 0 {
+    if req.method == "POST" && req.path == "/shutdown" && role != "admin" {
+        res = srv_err("403 Forbidden", "auth", "admin only")
+        return
+    }
+    if srv_use(req, root) == 0 {
         res = srv_err("400 Bad Request", "input", "bad collection name or open failed")
         return
     }
@@ -182,6 +225,8 @@ func cmd_serve(fs) {
     do_open(fs)
     g_srv_db = need_db(fs)
     gr_park()
+    tn_load_cache()
+    g_sweep_last = now_ms()
     port := flag_int_val(fs, "port")
     if port == 0 { port = 4444 }
     g_srv_token = flag_get(fs, "token")

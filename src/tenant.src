@@ -1,0 +1,166 @@
+// grange multi-tenancy + metering — M5.
+//
+// A tenant = a peage wallet + an isolated db dir. Self-serve signup:
+//   POST /tenants  (X-Peage-Wallet: pw_...)  ->  {tenant, token gt_...}
+// Tenant tokens scope every data route to <srv_db>.tenants/<tid>/ (the dot
+// keeps it out of the admin /collections listing). Records live in the admin
+// db's _sys collection — grange dogfooding grange.
+//
+// Pricing: pay-as-you-go storage, GRANGE_PRICE_CENTS_GB_MONTH (default 15 =
+// €0.15/GB/month), accrued continuously (price/30 cents per GB-day) on bytes
+// above GRANGE_FREE_BYTES (default 50 MB). A sweep piggybacks on requests
+// (single-actor stays single-actor), at most every 6h; accruals >= 5 cents
+// are charged to the tenant's wallet via peage (merchant key in
+// GRANGE_MERCHANT_KEY; unconfigured -> accrue only, never charge).
+
+var g_tenants = make(map[string]string)
+var g_sweep_last = 0
+
+func tn_price() (c) {
+    c = parse_int(env("GRANGE_PRICE_CENTS_GB_MONTH"))
+    if c == 0 { c = 15 }
+}
+
+func tn_free_bytes() (b) {
+    b = parse_int(env("GRANGE_FREE_BYTES"))
+    if b == 0 { b = 52428800 }
+}
+
+func tn_peage_url() (u) {
+    u = env("PEAGE_URL")
+    if len(u) == 0 { u = "https://peage.intrane.fr" }
+}
+
+func tn_root(tid) (d) {
+    d = g_srv_db + ".tenants/" + tid
+}
+
+// tn_accrue_cents: storage cost for `bytes` held over `elapsed_ms`, above the
+// free tier — (billable GB) * (price/30 per GB-day) * (elapsed days).
+func tn_accrue_cents(bytes, elapsed_ms, price_cents, free_bytes) (c) {
+    c = 0.0
+    billable := bytes - free_bytes
+    if billable <= 0 { return }
+    if elapsed_ms <= 0 { return }
+    gb := float(billable) / 1000000000.0
+    days := float(elapsed_ms) / 86400000.0
+    c = gb * (float(price_cents) / 30.0) * days
+}
+
+func tn_du(dir) (bytes) {
+    bytes = 0
+    code, out, errout := exec("du -sb " + dir + " 2>/dev/null | cut -f1")
+    if code == 0 { bytes = parse_int(trim(out)) }
+}
+
+// tn_load_cache scans _sys into the token->tid cache (serve startup).
+func tn_load_cache() {
+    ok, errmsg := gr_use(g_srv_db, "_sys")
+    if ok == 0 { return }
+    ids := keys(g_mem)
+    i := 0
+    while i < len(ids) {
+        if has_prefix(ids[i], "t") && has_prefix(ids[i], "bill-") == false {
+            tok, terr := json_get(g_mem[ids[i]], ".token")
+            if len(terr) == 0 { g_tenants[unq_tok(tok)] = ids[i] }
+        }
+        i = i + 1
+    }
+}
+
+func unq_tok(s) (out) {
+    out = s
+    if len(out) > 1 && charat(out, 0) == "\"" { out = substr(out, 1, len(out) - 1) }
+}
+
+// tn_create provisions a tenant for a wallet. Returns (tid, token).
+func tn_create(wallet, name) (tid, token) {
+    tid = "t" + to_hex(rand_bytes(6))
+    token = "gt_" + to_hex(rand_bytes(16))
+    ok, errmsg := gr_use(g_srv_db, "_sys")
+    gr_put(tid, "{\"token\":\"" + token + "\",\"wallet\":\"" + jesc(wallet) + "\",\"name\":\"" + jesc(name) + "\",\"created\":" + str(now_ms()) + "}")
+    gr_put("bill-" + tid, "{\"accrued_cents\":0,\"charged_cents\":0,\"last_ms\":" + str(now_ms()) + ",\"bytes\":0,\"past_due\":0}")
+    gr_commit()
+    g_tenants[token] = tid
+    mkdir(g_srv_db + ".tenants")
+    mkdir(tn_root(tid))
+}
+
+// tn_charge charges `cents` to `wallet` via peage. Returns 1 on success.
+func tn_charge(wallet, cents, idem) (ok, receipt) {
+    ok = 0
+    receipt = ""
+    key := env("GRANGE_MERCHANT_KEY")
+    if len(key) == 0 { return }
+    body := "{\"wallet_token\":\"" + jesc(wallet) + "\",\"amount_cents\":" + str(cents) + ",\"memo\":\"grange storage (" + str(tn_price()) + "c/GB/month)\",\"idempotency_key\":\"" + jesc(idem) + "\"}"
+    status, resp, herr := http_request("POST", tn_peage_url() + "/v1/charge", []string{"content-type: application/json", "authorization: Bearer " + key}, body)
+    if len(herr) > 0 { return }
+    if status == 200 {
+        ok = 1
+        rc, rerr := json_get(resp, ".receipt")
+        if len(rerr) == 0 { receipt = unq_tok(rc) }
+    }
+}
+
+// tn_sweep_one meters one tenant: recompute bytes, accrue, charge if due.
+func tn_sweep_one(tid) {
+    bill, bfound := gr_get("bill-" + tid)
+    if bfound == 0 { return }
+    trec, tfound := gr_get(tid)
+    if tfound == 0 { return }
+    accs, aerr := json_get(bill, ".accrued_cents")
+    lasts, lerr := json_get(bill, ".last_ms")
+    chgs, cerr := json_get(bill, ".charged_cents")
+    pds, perr := json_get(bill, ".past_due")
+    accrued := parse_float(accs)
+    last := parse_int(lasts)
+    charged := parse_int(chgs)
+    past_due := parse_int(pds)
+    bytes := tn_du(tn_root(tid))
+    nowms := now_ms()
+    accrued = accrued + tn_accrue_cents(bytes, nowms - last, tn_price(), tn_free_bytes())
+    if accrued >= 5.0 {
+        wtok, werr := json_get(trec, ".wallet")
+        due := int(accrued)
+        cok, receipt := tn_charge(unq_tok(wtok), due, "grange-" + tid + "-" + str(last))
+        if cok == 1 {
+            accrued = accrued - float(due)
+            charged = charged + due
+            past_due = 0
+        } else {
+            if len(env("GRANGE_MERCHANT_KEY")) > 0 { past_due = 1 }
+        }
+    }
+    gr_put("bill-" + tid, "{\"accrued_cents\":" + ix_fstr(accrued) + ",\"charged_cents\":" + str(charged) + ",\"last_ms\":" + str(nowms) + ",\"bytes\":" + str(bytes) + ",\"past_due\":" + str(past_due) + "}")
+}
+
+// tn_sweep meters every tenant, at most every 6h, piggybacked on a request.
+func tn_sweep() {
+    nowms := now_ms()
+    if nowms - g_sweep_last < 21600000 { return }
+    g_sweep_last = nowms
+    ok, errmsg := gr_use(g_srv_db, "_sys")
+    if ok == 0 { return }
+    ids := keys(g_mem)
+    i := 0
+    while i < len(ids) {
+        if has_prefix(ids[i], "t") && has_prefix(ids[i], "bill-") == false {
+            tn_sweep_one(ids[i])
+        }
+        i = i + 1
+    }
+    gr_commit()
+}
+
+// tn_usage renders a tenant's usage/billing view (fresh du, fresh accrual preview).
+func tn_usage(tid) (data) {
+    ok, errmsg := gr_use(g_srv_db, "_sys")
+    bill, bfound := gr_get("bill-" + tid)
+    bytes := tn_du(tn_root(tid))
+    accs, aerr := json_get(bill, ".accrued_cents")
+    lasts, lerr := json_get(bill, ".last_ms")
+    chgs, cerr := json_get(bill, ".charged_cents")
+    pds, perr := json_get(bill, ".past_due")
+    pending := parse_float(accs) + tn_accrue_cents(bytes, now_ms() - parse_int(lasts), tn_price(), tn_free_bytes())
+    data = "{\"tenant\":\"" + jesc(tid) + "\",\"bytes\":" + str(bytes) + ",\"free_bytes\":" + str(tn_free_bytes()) + ",\"price_cents_gb_month\":" + str(tn_price()) + ",\"accrued_cents\":" + ix_fstr(pending) + ",\"charged_cents_total\":" + chgs + ",\"past_due\":" + pds + ",\"pay_rail\":\"peage\"}"
+}

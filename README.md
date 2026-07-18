@@ -68,8 +68,23 @@ build. Collection switching is O(1): MFL maps are reference types, so parking
 and restoring a collection's whole state is a handful of map assignments.
 Concurrent-reader serving is deliberately future work.
 
-A hosted instance runs at **https://grange.intrane.fr** (bearer-token gated;
-`/health` is open — the seed of the managed offering).
+## Hosted: grange.intrane.fr
+
+A managed instance runs at **https://grange.intrane.fr**. Signup is self-serve
+and agent-first — a [peage](https://peage.intrane.fr) wallet is the only
+credential:
+
+```sh
+curl -X POST https://grange.intrane.fr/tenants -H "X-Peage-Wallet: pw_..." -d '{"name":"my agent"}'
+# -> {"tenant":"t...","token":"gt_...", "pricing":{...}}
+```
+
+Your `gt_` token scopes every route to an isolated namespace (own collections,
+indexes, WAL — a real db directory per tenant). **Pricing: pay-as-you-go
+storage, €0.15/GB/month above 50 MB free**, accrued continuously and charged
+to your wallet via peage (min charge 5 cents; `GET /usage` shows bytes,
+accrual, and charges at any time). No subscription, no card on file — fund the
+wallet once, the meter does the rest.
 
 Embedded, from any machin app:
 
@@ -88,14 +103,14 @@ doc, found := gr_get("u1")
 
 ```sh
 make build    # needs machin >= 0.108
-make verify   # check + tests (65) + 100k bench + crash harness
+make verify   # check + tests (69) + 100k bench + crash harness
 ```
 
-## Scope & honesty (M4)
+## Scope & honesty (M5)
 
 - Whole dataset + indexes live in memory (memtable = the db); segments make cold open fast, not memory small. Steady-state RSS at 100k docs + 1 index is ~120 MB (fresh process); the bench process peaks at ~440 MB from MFL arena temporaries — a memory diet is the standing target.
 - `--where` supports equality + numeric ranges. Equality clauses use buckets; a single range clause on a `--range` field uses the sorted projection (built lazily on the first range query after a write — the build cost is the first query's, honestly). Multi-clause range queries scan. Aggregate registers cover count/sum/avg; `--minmax` computes min/max on the scan path.
 - Durability is process-crash-exact (proven by `make crash`), OS-crash best-effort (no fsync builtin in MFL yet).
-- `grange serve` handles one request at a time (correctness first) across any number of collections. Concurrent readers and metered multi-tenant hosting are next.
+- `grange serve` handles one request at a time (correctness first) across any number of collections and tenants. Metering charges storage only (no per-query fees yet); billing sweeps piggyback on requests every 6h. Concurrent readers are next.
 
 MIT.

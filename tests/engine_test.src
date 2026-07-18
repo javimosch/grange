@@ -186,6 +186,18 @@ func main() {
     ok, errmsg = gr_open(db, "c2")
     assert_eq_int(gr_count(), 3, "use: pending write committed before park")
 
+    // ---- M5: metering math ----
+    // 1 GB above free tier for 30 days at 15c/GB/month = 15 cents
+    free := 52428800
+    c30 := tn_accrue_cents(1000000000 + free, 30 * 86400000, 15, free)
+    assert(c30 > 14.99 && c30 < 15.01, "1GB for 30d = 15c")
+    // half a GB for one day = 0.25c
+    cday := tn_accrue_cents(500000000 + free, 86400000, 15, free)
+    assert(cday > 0.2499 && cday < 0.2501, "0.5GB for 1d = 0.25c")
+    // free tier costs nothing
+    assert_eq_str(ix_fstr(tn_accrue_cents(free, 86400000, 15, free)), "0", "free tier = 0")
+    assert_eq_str(ix_fstr(tn_accrue_cents(1000, 0, 15, free)), "0", "zero elapsed = 0")
+
     // ix_fstr precision (the %g bug): big integral sums print exactly
     assert_eq_str(ix_fstr(16649667.0), "16649667", "fstr big int exact")
     assert_eq_str(ix_fstr(499.5), "499.5", "fstr fraction")
