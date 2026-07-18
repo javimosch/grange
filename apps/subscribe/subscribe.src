@@ -1,0 +1,132 @@
+// grange-subscribe — the landing's subscriber backend, and grange's first
+// external dogfood consumer: UI (landing form) -> this service -> machin
+// client SDK (grange_client.src) -> HOSTED grange, as a real paying tenant.
+//
+// Deliberately a separate process from grange itself: the grange actor
+// calling its own HTTP API would deadlock on itself; a separate service is
+// also simply the honest shape of a customer.
+//
+// Compose:
+//   machin encode framework/flags.src framework/machweb.src sdk/machin/grange_client.src apps/subscribe/subscribe.src
+//
+// Single-actor accept loop (same discipline as grange serve): the in-memory
+// per-IP rate map is touched by one goroutine — race analysis stays clean.
+
+var s_grange = Grange{base: "", token: "", db: "default", coll: "subscribers"}
+var s_rl_win = make(map[string]int)
+var s_rl_n = make(map[string]int)
+
+func sub_res(fd, status, body) {
+    out := "HTTP/1.1 " + status + "\r\nContent-Type: application/json\r\nContent-Length: " + str(len(body)) + "\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, GET, OPTIONS\r\nAccess-Control-Allow-Headers: content-type\r\nConnection: close\r\n\r\n" + body
+    write(fd, out)
+    close(fd)
+}
+
+func sub_valid_email(e) (ok) {
+    ok = 0
+    if len(e) < 5 { return }
+    if len(e) > 200 { return }
+    at := index(e, "@")
+    if at < 1 { return }
+    dot := index(substr(e, at, len(e)), ".")
+    if dot < 1 { return }
+    if contains(e, " ") { return }
+    if contains(e, "\n") { return }
+    if contains(e, "\t") { return }
+    if contains(e, "|") { return }
+    if contains(e, "/") { return }
+    if contains(e, "\"") { return }
+    if contains(e, "\\") { return }
+    ok = 1
+}
+
+func sub_client_ip(req) (ip) {
+    ip = header(req, "x-forwarded-for")
+    c := index(ip, ",")
+    if c > 0 { ip = substr(ip, 0, c) }
+    ip = trim(ip)
+    if len(ip) == 0 { ip = req.remote }
+}
+
+// 5 subscribe attempts per IP per minute
+func sub_limited(ip) (yes) {
+    yes = 0
+    nowms := now_ms()
+    if nowms - s_rl_win[ip] >= 60000 {
+        s_rl_win[ip] = nowms
+        s_rl_n[ip] = 0
+    }
+    s_rl_n[ip] = s_rl_n[ip] + 1
+    if s_rl_n[ip] > 5 { yes = 1 }
+}
+
+func sub_handle(fd, req) {
+    if req.method == "OPTIONS" {
+        sub_res(fd, "204 No Content", "")
+        return
+    }
+    if req.method == "GET" && has_prefix(req.path, "/count") {
+        n := grange_count(s_grange, "")
+        if n < 0 {
+            sub_res(fd, "502 Bad Gateway", "{\"ok\":false,\"error\":{\"type\":\"upstream\",\"message\":\"grange unreachable\"}}")
+            return
+        }
+        sub_res(fd, "200 OK", "{\"ok\":true,\"data\":{\"subscribers\":" + str(n) + "}}")
+        return
+    }
+    if req.method == "POST" && has_prefix(req.path, "/subscribe") {
+        if sub_limited(sub_client_ip(req)) == 1 {
+            sub_res(fd, "429 Too Many Requests", "{\"ok\":false,\"error\":{\"type\":\"rate-limited\",\"message\":\"try again in a minute\"}}")
+            return
+        }
+        email := to_lower(trim(req.body))
+        if sub_valid_email(email) == 0 {
+            sub_res(fd, "400 Bad Request", "{\"ok\":false,\"error\":{\"type\":\"input\",\"message\":\"send a plain-text email address as the body\"}}")
+            return
+        }
+        // email is the doc id -> naturally deduped (second signup = overwrite)
+        doc := "{\"email\":\"" + email + "\",\"ts\":" + str(now_ms()) + ",\"src\":\"landing\"}"
+        id, ok := grange_put(s_grange, email, doc)
+        if ok == 0 {
+            sub_res(fd, "502 Bad Gateway", "{\"ok\":false,\"error\":{\"type\":\"upstream\",\"message\":\"could not persist — try again\"}}")
+            return
+        }
+        n := grange_count(s_grange, "")
+        write(2, "{\"event\":\"subscribed\",\"email\":\"" + email + "\",\"total\":" + str(n) + "}\n")
+        sub_res(fd, "200 OK", "{\"ok\":true,\"data\":{\"subscribed\":true,\"subscribers\":" + str(n) + "}}")
+        return
+    }
+    sub_res(fd, "404 Not Found", "{\"ok\":false,\"error\":{\"type\":\"not-found\",\"message\":\"POST /subscribe (text/plain email body) or GET /count\"}}")
+}
+
+func main() {
+    fs := new_flags("grange-subscribe")
+    fs = flag_int(fs, "port", "p", "8803", "HTTP port")
+    fs = flag_str(fs, "grange", "g", "https://grange.intrane.fr", "grange base URL")
+    fs = flag_str(fs, "token", "t", "", "grange tenant token (or GRANGE_SUB_TOKEN)")
+    fs = parse_flags(fs, args())
+    if flag_on(fs, "help") { println(flag_usage(fs))  return }
+    tok := flag_get(fs, "token")
+    if len(tok) == 0 { tok = env("GRANGE_SUB_TOKEN") }
+    if len(tok) == 0 { write(2, "{\"error\":\"missing --token / GRANGE_SUB_TOKEN\"}\n")  exit(81) }
+    s_grange = grange_client(flag_get(fs, "grange"), tok)
+    s_grange = grange_use(s_grange, "default", "subscribers")
+    port := flag_int_val(fs, "port")
+    println("{\"event\":\"listening\",\"port\":" + str(port) + ",\"upstream\":\"" + flag_get(fs, "grange") + "\"}")
+    flush()
+    server := listen(port)
+    for {
+        conn := accept(server)
+        if conn >= 0 {
+            socket_timeout(conn, 5000)
+            raw := read_request(conn)
+            if len(raw) == 0 {
+                close(conn)
+            } else {
+                req := parse_request(raw)
+                req.remote = peer_addr(conn)
+                sub_handle(conn, req)
+            }
+        }
+    }
+}
