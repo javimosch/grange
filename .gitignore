@@ -1,3 +1,5 @@
 grange
 grange.mfl
 enc.err
+sdk/python/dist/
+sdk/python/*.egg-info/

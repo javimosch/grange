@@ -81,7 +81,7 @@ curl -X POST https://grange.intrane.fr/tenants -H "X-Peage-Wallet: pw_..." -d '{
 
 Your `gt_` token scopes every route to an isolated namespace with **multiple
 databases** (`?db=`, default `default`), each holding collections, indexes and
-its own WAL. Client SDKs for **Node.js (`npm i grange-db`), Go, and machin**
+its own WAL. Client SDKs for **Python (`pip i grange-db`), Node.js (`npm i grange-db`), Go, and machin**
 live in [`sdk/`](sdk/), with bulk writes (`putMany` — newline-delimited ops,
 one commit, all-or-nothing, ~263k docs/s measured over HTTP). **Pricing: pay-as-you-go
 storage, €0.15/GB/month above 50 MB free**, accrued continuously and charged

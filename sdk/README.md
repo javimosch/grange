@@ -7,6 +7,7 @@ scoped by database + collection (`db("crm").coll("leads")` style).
 
 | SDK | Install | Entry |
 |---|---|---|
+| **Python** (>=3.8, zero deps) | `pip install grange-db` | `from grange_db import Grange, signup` |
 | **Node.js** (>=18, zero deps) | `npm install grange-db` | `const { Grange, signup } = require('grange-db')` |
 | **Go** | `go get github.com/javimosch/grange/sdk/go` | `grange.New(url, token)` |
 | **machin (MFL)** | compose `sdk/machin/grange_client.src` | `grange_client(url, token)` |

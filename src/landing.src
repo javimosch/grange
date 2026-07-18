@@ -32,8 +32,22 @@ func llms_txt() (t) {
         "COMPACT curl -s -X POST $G/compact -H \"$A\" -d '{\"coll\":\"leads\"}'             # fold WAL chunks; run when stats.chunks_replayed grows\n" +
         "USAGE   curl -s $G/usage -H \"$A\"\n" +
         "HEALTH  curl -s $G/health                                                      # open, no auth\n\n" +
-        "Docs are single-line minified JSON. Errors: {\"ok\":false,\"error\":{type,message}} with proper HTTP codes.\n" +
-        "SDKs: Node.js `npm i grange-db` · Go `go get github.com/javimosch/grange/sdk/go` · machin: compose sdk/machin/grange_client.src — https://github.com/javimosch/grange/tree/main/sdk\n" +
+        "Docs are single-line minified JSON. Errors: {\"ok\":false,\"error\":{type,message}} with proper HTTP codes.\n\n" +
+        "## Client SDKs (same surface everywhere: db(...).coll(...) scoping + put/get/find/count/agg/index/put_many)\n\n" +
+        "Python  pip install grange-db\n" +
+        "        from grange_db import Grange\n" +
+        "        leads = Grange(url, token).db('crm').coll('leads')\n" +
+        "        leads.put({'co':'acme'}); leads.count('co=acme'); leads.put_many([{...},...])\n\n" +
+        "Node    npm install grange-db     (>=18, zero deps)\n" +
+        "        const { Grange } = require('grange-db')\n" +
+        "        const leads = new Grange({url, token}).db('crm').coll('leads')\n" +
+        "        await leads.put({co:'acme'}); await leads.count('co=acme'); await leads.putMany([...])\n\n" +
+        "Go      go get github.com/javimosch/grange/sdk/go\n" +
+        "        leads := grange.New(url, token).DB(\"crm\").Coll(\"leads\")\n" +
+        "        id, _ := leads.Put(\"\", map[string]any{\"co\":\"acme\"}); n, _ := leads.Count(\"co=acme\")\n\n" +
+        "machin  compose sdk/machin/grange_client.src (https://github.com/javimosch/grange)\n" +
+        "        g := grange_client(url, token)  g = grange_use(g, \"crm\", \"leads\")\n" +
+        "        id, ok := grange_put(g, \"\", doc)  n := grange_count(g, \"co=acme\")\n\n" +
         "Durability: every write request is one immutable checksummed WAL chunk (process-crash-exact).\n" +
         "Your data is exportable at any time (find with a high limit, per collection) and the engine is OSS —\n" +
         "self-host the same binary if you outgrow the hosted rail.\n"
