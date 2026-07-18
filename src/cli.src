@@ -39,6 +39,7 @@ func valid_doc(doc) (ok) {
     ok = 0
     if len(doc) == 0 { return }
     if contains(doc, "\n") { return }
+    if contains(doc, "\t") { return }
     first := charat(doc, 0)
     if first != "{" && first != "[" { return }
     ok = 1
@@ -116,16 +117,33 @@ func cmd_del(fs) {
     emit_ok("{\"id\":\"" + jesc(id) + "\",\"deleted\":true}")
 }
 
+// wh_candidates picks the id set to test: an indexed where-field's bucket if
+// one exists (mode "indexed"), else every id (mode "scan").
+func wh_candidates(fields, vals) (ids, mode) {
+    ids = []string{}
+    mode = "scan"
+    i := 0
+    while i < len(fields) {
+        if ix_is_indexed(fields[i]) == 1 {
+            ids = g_buckets[ix_bucket(fields[i], vals[i])]
+            mode = "indexed"
+            return
+        }
+        i = i + 1
+    }
+    ids = keys(g_mem)
+}
+
 func cmd_find(fs) {
     do_open(fs)
     fields, vals := wh_pairs(flag_get(fs, "where"))
     limit := flag_int_val(fs, "limit")
-    ids := keys(g_mem)
+    ids, mode := wh_candidates(fields, vals)
     items := []string{}
     n := 0
     i := 0
     while i < len(ids) {
-        if n >= limit { break }
+        if limit > 0 && n >= limit { break }
         doc := g_mem[ids[i]]
         if wh_match(doc, fields, vals) == 1 {
             items = append(items, "{\"id\":\"" + jesc(ids[i]) + "\",\"doc\":" + doc + "}")
@@ -133,7 +151,7 @@ func cmd_find(fs) {
         }
         i = i + 1
     }
-    emit_ok("{\"count\":" + str(n) + ",\"items\":[" + join(items, ",") + "]}")
+    emit_ok("{\"count\":" + str(n) + ",\"mode\":\"" + mode + "\",\"items\":[" + join(items, ",") + "]}")
 }
 
 func cmd_count(fs) {
@@ -143,14 +161,108 @@ func cmd_count(fs) {
         emit_ok("{\"count\":" + str(gr_count()) + "}")
         return
     }
-    ids := keys(g_mem)
+    // O(1) fast path: a single where clause on an indexed field
+    if len(fields) == 1 && ix_is_indexed(fields[0]) == 1 {
+        emit_ok("{\"count\":" + str(g_bcount[ix_bucket(fields[0], vals[0])]) + ",\"mode\":\"indexed\"}")
+        return
+    }
+    ids, mode := wh_candidates(fields, vals)
     n := 0
     i := 0
     while i < len(ids) {
         if wh_match(g_mem[ids[i]], fields, vals) == 1 { n = n + 1 }
         i = i + 1
     }
-    emit_ok("{\"count\":" + str(n) + "}")
+    emit_ok("{\"count\":" + str(n) + ",\"mode\":\"" + mode + "\"}")
+}
+
+func cmd_index(fs) {
+    f := flag_get(fs, "field")
+    if len(f) == 0 { emit_err(81, "input", "missing --field", 1, "pass --field <name> to index") }
+    do_open(fs)
+    if gr_index_add(f, flag_get(fs, "sums")) == 0 { emit_err(111, "internal", "could not persist index declaration", 0, "check disk space and permissions") }
+    emit_ok("{\"field\":\"" + jesc(f) + "\",\"sums\":\"" + jesc(flag_get(fs, "sums")) + "\",\"docs_indexed\":" + str(gr_count()) + "}")
+}
+
+func cmd_indexes(fs) {
+    do_open(fs)
+    items := []string{}
+    i := 0
+    while i < len(g_ifields) {
+        items = append(items, "{\"field\":\"" + jesc(g_ifields[i]) + "\",\"sums\":\"" + jesc(g_isums[g_ifields[i]]) + "\"}")
+        i = i + 1
+    }
+    emit_ok("{\"indexes\":[" + join(items, ",") + "]}")
+}
+
+func agg_group(gtok, n, sf, sums) (item) {
+    item = "{\"value\":" + gtok + ",\"count\":" + str(n)
+    j := 0
+    while j < len(sf) {
+        s := sums[gtok + "\t" + sf[j]]
+        item = item + ",\"sum_" + sf[j] + "\":" + ix_fstr(s)
+        if n > 0 { item = item + ",\"avg_" + sf[j] + "\":" + ix_fstr(s / float(n)) }
+        j = j + 1
+    }
+    item = item + "}"
+}
+
+func cmd_agg(fs) {
+    f := flag_get(fs, "group-by")
+    if len(f) == 0 { emit_err(81, "input", "missing --group-by", 1, "pass --group-by <field>") }
+    do_open(fs)
+    sumspec := flag_get(fs, "sum")
+    sf := []string{}
+    if len(sumspec) > 0 { sf = split(sumspec, ",") }
+    // indexed fast path: registers already hold count+sums per group
+    if ix_is_indexed(f) == 1 && (len(sumspec) == 0 || contains("," + g_isums[f] + ",", "," + sumspec + ",") || g_isums[f] == sumspec) {
+        pre := f + "\t"
+        gsums := make(map[string]float)
+        bks := keys(g_bcount)
+        items := []string{}
+        i := 0
+        while i < len(bks) {
+            if has_prefix(bks[i], pre) && g_bcount[bks[i]] > 0 {
+                gtok := substr(bks[i], len(pre), len(bks[i]))
+                j := 0
+                while j < len(sf) {
+                    gsums[gtok + "\t" + sf[j]] = g_breg[bks[i] + "\t" + sf[j]]
+                    j = j + 1
+                }
+                items = append(items, agg_group(gtok, g_bcount[bks[i]], sf, gsums))
+            }
+            i = i + 1
+        }
+        emit_ok("{\"group_by\":\"" + jesc(f) + "\",\"mode\":\"indexed\",\"groups\":[" + join(items, ",") + "]}")
+        return
+    }
+    // scan path
+    gcount := make(map[string]int)
+    gsums := make(map[string]float)
+    ids := keys(g_mem)
+    i := 0
+    while i < len(ids) {
+        doc := g_mem[ids[i]]
+        gtok := ix_field_tok(doc, f)
+        if len(gtok) > 0 {
+            gcount[gtok] = gcount[gtok] + 1
+            j := 0
+            while j < len(sf) {
+                stok := ix_field_tok(doc, sf[j])
+                if len(stok) > 0 { gsums[gtok + "\t" + sf[j]] = gsums[gtok + "\t" + sf[j]] + ix_tok_num(stok) }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    gtoks := keys(gcount)
+    items := []string{}
+    i = 0
+    while i < len(gtoks) {
+        items = append(items, agg_group(gtoks[i], gcount[gtoks[i]], sf, gsums))
+        i = i + 1
+    }
+    emit_ok("{\"group_by\":\"" + jesc(f) + "\",\"mode\":\"scan\",\"groups\":[" + join(items, ",") + "]}")
 }
 
 func cmd_compact(fs) {
@@ -162,7 +274,7 @@ func cmd_compact(fs) {
 
 func cmd_stats(fs) {
     do_open(fs)
-    emit_ok("{\"docs\":" + str(gr_count()) + ",\"gen\":" + str(g_gen) + ",\"chunks_replayed\":" + str(g_replayed_chunks) + ",\"chunks_skipped\":" + str(g_skipped_chunks) + ",\"next_chunk\":" + str(g_next_chunk) + "}")
+    emit_ok("{\"docs\":" + str(gr_count()) + ",\"gen\":" + str(g_gen) + ",\"chunks_replayed\":" + str(g_replayed_chunks) + ",\"chunks_skipped\":" + str(g_skipped_chunks) + ",\"next_chunk\":" + str(g_next_chunk) + ",\"indexes\":" + str(len(g_ifields)) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}")
 }
 
 // torture: crash-test writer — puts docs in small commits until killed.
@@ -184,11 +296,11 @@ func cmd_torture(fs) {
 }
 
 func cmd_guide() {
-    println("{\"tool\":\"grange\",\"version\":\"0.1.0\",\"model\":\"document store: collections of minified-JSON docs keyed by id. Writes stage in memory and become durable at commit (one immutable checksummed WAL chunk per commit). Recovery replays the newest valid segment + its valid chunks; a torn last chunk is dropped (all-or-nothing per commit). compact folds everything into a fresh segment.\",\"loop\":[\"put --db d --doc '{...}' -> {id}\",\"get --db d --id X\",\"find --db d --where status=active --limit 50\",\"del --db d --id X\",\"compact --db d (fold WAL chunks into a segment; run when stats.chunks_replayed grows)\"],\"concepts\":{\"db\":\"a directory; --coll names a sub-collection (default: default)\",\"where\":\"comma-separated field=value equality, ANDed; matches string/number/bool top-level fields\",\"durability\":\"per-commit chunk files with sha256 trailers; no fsync builtin yet — OS-crash durability is best-effort, process-crash durability is exact\"},\"edge_cases\":[\"docs must be single-line minified JSON\",\"ids: no | / newline or slash\",\"where values containing , or = are not expressible in M0 — use get by id\"],\"exit_codes\":{\"0\":\"ok\",\"80-89\":\"input\",\"90-99\":\"not found\",\"110-119\":\"internal\"}}")
+    println("{\"tool\":\"grange\",\"version\":\"0.1.0\",\"model\":\"document store: collections of minified-JSON docs keyed by id. Writes stage in memory and become durable at commit (one immutable checksummed WAL chunk per commit). Recovery replays the newest valid segment + its valid chunks; a torn last chunk is dropped (all-or-nothing per commit). compact folds everything into a fresh segment.\",\"loop\":[\"put --db d --doc '{...}' -> {id}\",\"get --db d --id X\",\"find --db d --where status=active --limit 50\",\"del --db d --id X\",\"index --db d --field status --sums score (declare once; makes find/count O(bucket) and count/agg O(1))\",\"agg --db d --group-by status --sum score -> per-group count/sum/avg\",\"compact --db d (fold WAL chunks into a segment; run when stats.chunks_replayed grows)\"],\"concepts\":{\"db\":\"a directory; --coll names a sub-collection (default: default)\",\"where\":\"comma-separated field=value equality, ANDed; matches string/number/bool top-level fields\",\"durability\":\"per-commit chunk files with sha256 trailers; no fsync builtin yet — OS-crash durability is best-effort, process-crash durability is exact\"},\"edge_cases\":[\"docs must be single-line minified JSON\",\"ids: no | / newline or slash\",\"where values containing , or = are not expressible in M0 — use get by id\"],\"exit_codes\":{\"0\":\"ok\",\"80-89\":\"input\",\"90-99\":\"not found\",\"110-119\":\"internal\"}}")
 }
 
 func cmd_help_json() {
-    println("{\"tool\":\"grange\",\"version\":\"0.1.0\",\"summary\":\"machin-native embedded document database — agent-first, single binary\",\"commands\":[{\"name\":\"put\",\"flags\":[\"--db\",\"--coll\",\"--id\",\"--doc\"],\"out\":\"{id}\"},{\"name\":\"get\",\"flags\":[\"--db\",\"--coll\",\"--id\"],\"out\":\"{id,doc}\"},{\"name\":\"del\",\"flags\":[\"--db\",\"--coll\",\"--id\"],\"out\":\"{id,deleted}\"},{\"name\":\"find\",\"flags\":[\"--db\",\"--coll\",\"--where\",\"--limit\"],\"out\":\"{count,items}\"},{\"name\":\"count\",\"flags\":[\"--db\",\"--coll\",\"--where\"],\"out\":\"{count}\"},{\"name\":\"compact\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{gen,docs}\"},{\"name\":\"stats\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{docs,gen,chunks_replayed,chunks_skipped}\"},{\"name\":\"bench\",\"flags\":[\"--db\",\"--n\",\"--vs-sqlite\"],\"out\":\"benchmark metrics\"},{\"name\":\"guide\",\"flags\":[],\"out\":\"operator manual\"}]}")
+    println("{\"tool\":\"grange\",\"version\":\"0.1.0\",\"summary\":\"machin-native embedded document database — agent-first, single binary\",\"commands\":[{\"name\":\"put\",\"flags\":[\"--db\",\"--coll\",\"--id\",\"--doc\"],\"out\":\"{id}\"},{\"name\":\"get\",\"flags\":[\"--db\",\"--coll\",\"--id\"],\"out\":\"{id,doc}\"},{\"name\":\"del\",\"flags\":[\"--db\",\"--coll\",\"--id\"],\"out\":\"{id,deleted}\"},{\"name\":\"find\",\"flags\":[\"--db\",\"--coll\",\"--where\",\"--limit\"],\"out\":\"{count,items}\"},{\"name\":\"count\",\"flags\":[\"--db\",\"--coll\",\"--where\"],\"out\":\"{count}\"},{\"name\":\"index\",\"flags\":[\"--db\",\"--coll\",\"--field\",\"--sums\"],\"out\":\"{field,sums,docs_indexed}\"},{\"name\":\"indexes\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{indexes}\"},{\"name\":\"agg\",\"flags\":[\"--db\",\"--coll\",\"--group-by\",\"--sum\"],\"out\":\"{group_by,mode,groups}\"},{\"name\":\"compact\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{gen,docs}\"},{\"name\":\"stats\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{docs,gen,chunks_replayed,chunks_skipped}\"},{\"name\":\"bench\",\"flags\":[\"--db\",\"--n\",\"--vs-sqlite\"],\"out\":\"benchmark metrics\"},{\"name\":\"guide\",\"flags\":[],\"out\":\"operator manual\"}]}")
 }
 
 func main() {
@@ -202,6 +314,10 @@ func main() {
     fs = flag_int(fs, "n", "n", "100000", "bench/torture record count")
     fs = flag_int(fs, "batch", "b", "1000", "commit batch size")
     fs = flag_bool(fs, "vs-sqlite", "S", "bench: also run the same workload on the SQLite builtin")
+    fs = flag_str(fs, "field", "f", "", "index: field to index")
+    fs = flag_str(fs, "sums", "s", "", "index: comma-separated numeric fields to keep sum registers for")
+    fs = flag_str(fs, "group-by", "g", "", "agg: field to group by")
+    fs = flag_str(fs, "sum", "u", "", "agg: comma-separated numeric fields to sum/avg")
     fs = parse_flags(fs, args())
     rest := flag_args(fs)
     if len(rest) == 0 {
@@ -215,6 +331,9 @@ func main() {
     if verb == "find" { cmd_find(fs)  return }
     if verb == "count" { cmd_count(fs)  return }
     if verb == "compact" { cmd_compact(fs)  return }
+    if verb == "index" { cmd_index(fs)  return }
+    if verb == "indexes" { cmd_indexes(fs)  return }
+    if verb == "agg" { cmd_agg(fs)  return }
     if verb == "stats" { cmd_stats(fs)  return }
     if verb == "bench" { cmd_bench(fs)  return }
     if verb == "torture" { cmd_torture(fs)  return }

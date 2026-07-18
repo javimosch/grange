@@ -1,0 +1,185 @@
+// grange secondary indexes — M1.
+//
+// An index is declared per field (optionally with sum registers on numeric
+// fields) and kept entirely in memory, rebuilt on open from the memtable.
+// Declarations persist in <db>/<coll>/fields.idx ("field[\tsum1,sum2]" lines).
+//
+//   g_buckets  "field \t token"            -> []ids     (equality find)
+//   g_bcount   "field \t token"            -> live count (O(1) count)
+//   g_breg     "field \t token \t sumfld"  -> sum        (O(1) sum/avg)
+//
+// Tokens are raw JSON tokens ("\"paused\"", "42", "true") so number/string/
+// bool fields all index. A doc missing the field simply isn't in any bucket.
+
+var g_ifields = []string{}
+var g_isums = make(map[string]string)
+var g_buckets = make(map[string][]string)
+var g_bcount = make(map[string]int)
+var g_breg = make(map[string]float)
+
+// ix_fstr formats a float without %g's 6-significant-digit rounding
+// (str(16649667.0) prints "1.66497e+07"): integral values print as integers,
+// others with 6 decimals.
+func ix_fstr(x) (s) {
+    v := x
+    sign := ""
+    if v < 0.0 { sign = "-"  v = 0.0 - v }
+    ip := int(v)
+    fr := int((v - float(ip)) * 1000000.0 + 0.5)
+    if fr >= 1000000 { ip = ip + 1  fr = 0 }
+    if fr == 0 {
+        s = sign + str(ip)
+        return
+    }
+    fs := str(fr)
+    while len(fs) < 6 { fs = "0" + fs }
+    while has_suffix(fs, "0") { fs = substr(fs, 0, len(fs) - 1) }
+    s = sign + str(ip) + "." + fs
+}
+
+func ix_tok_num(tok) (v) {
+    t := tok
+    if len(t) > 1 && charat(t, 0) == "\"" { t = substr(t, 1, len(t) - 1) }
+    v = parse_float(t)
+}
+
+func ix_field_tok(doc, f) (tok) {
+    tok = ""
+    v, err := json_get(doc, "." + f)
+    if len(err) == 0 { tok = v }
+}
+
+func ix_add(id, doc) {
+    i := 0
+    while i < len(g_ifields) {
+        f := g_ifields[i]
+        tok := ix_field_tok(doc, f)
+        if len(tok) > 0 {
+            k := f + "\t" + tok
+            g_buckets[k] = append(g_buckets[k], id)
+            g_bcount[k] = g_bcount[k] + 1
+            sums := g_isums[f]
+            if len(sums) > 0 {
+                sf := split(sums, ",")
+                j := 0
+                while j < len(sf) {
+                    stok := ix_field_tok(doc, sf[j])
+                    if len(stok) > 0 { g_breg[k + "\t" + sf[j]] = g_breg[k + "\t" + sf[j]] + ix_tok_num(stok) }
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+func ix_remove(id, doc) {
+    i := 0
+    while i < len(g_ifields) {
+        f := g_ifields[i]
+        tok := ix_field_tok(doc, f)
+        if len(tok) > 0 {
+            k := f + "\t" + tok
+            old := g_buckets[k]
+            nw := []string{}
+            j := 0
+            while j < len(old) {
+                if old[j] != id { nw = append(nw, old[j]) }
+                j = j + 1
+            }
+            g_buckets[k] = nw
+            g_bcount[k] = g_bcount[k] - 1
+            sums := g_isums[f]
+            if len(sums) > 0 {
+                sf := split(sums, ",")
+                j = 0
+                while j < len(sf) {
+                    stok := ix_field_tok(doc, sf[j])
+                    if len(stok) > 0 { g_breg[k + "\t" + sf[j]] = g_breg[k + "\t" + sf[j]] - ix_tok_num(stok) }
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+func ix_clear() {
+    g_buckets = make(map[string][]string)
+    g_bcount = make(map[string]int)
+    g_breg = make(map[string]float)
+}
+
+func ix_rebuild() {
+    ix_clear()
+    ids := keys(g_mem)
+    i := 0
+    while i < len(ids) {
+        ix_add(ids[i], g_mem[ids[i]])
+        i = i + 1
+    }
+}
+
+func ix_is_indexed(f) (yes) {
+    yes = 0
+    i := 0
+    while i < len(g_ifields) {
+        if g_ifields[i] == f { yes = 1  return }
+        i = i + 1
+    }
+}
+
+// ix_save / ix_load persist declarations (data is rebuilt, never persisted).
+func ix_save() (ok) {
+    lines := []string{}
+    i := 0
+    while i < len(g_ifields) {
+        ln := g_ifields[i]
+        if len(g_isums[g_ifields[i]]) > 0 { ln = ln + "\t" + g_isums[g_ifields[i]] }
+        lines = append(lines, ln)
+        i = i + 1
+    }
+    ok = 1
+    if write_file(gr_dir() + "/fields.idx", join(lines, "\n") + "\n") < 0 { ok = 0 }
+}
+
+func ix_load() {
+    g_ifields = []string{}
+    g_isums = make(map[string]string)
+    content := read_file(gr_dir() + "/fields.idx")
+    if len(content) == 0 { return }
+    lines := split(content, "\n")
+    i := 0
+    while i < len(lines) {
+        ln := lines[i]
+        if len(ln) > 0 {
+            tabp := index(ln, "\t")
+            if tabp >= 0 {
+                f := substr(ln, 0, tabp)
+                g_ifields = append(g_ifields, f)
+                g_isums[f] = substr(ln, tabp + 1, len(ln))
+            } else {
+                g_ifields = append(g_ifields, ln)
+            }
+        }
+        i = i + 1
+    }
+}
+
+// gr_index_add declares an index (idempotent on field) and builds it.
+func gr_index_add(f, sums) (ok) {
+    if ix_is_indexed(f) == 0 { g_ifields = append(g_ifields, f) }
+    g_isums[f] = sums
+    ok = ix_save()
+    ix_rebuild()
+}
+
+// ix_bucket resolves a --where value (unquoted user input) to a bucket key,
+// trying the JSON-string token first, then the raw token (number/bool).
+func ix_bucket(f, v) (k) {
+    kq := f + "\t\"" + v + "\""
+    k = kq
+    if g_bcount[kq] > 0 { return }
+    kr := f + "\t" + v
+    if g_bcount[kr] > 0 { k = kr }
+}

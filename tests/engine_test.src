@@ -62,5 +62,42 @@ func main() {
     ok, errmsg = gr_open(db, "other")
     assert_eq_int(gr_count(), 0, "collections isolated")
 
+    // ---- M1: indexes + registers ----
+    ok, errmsg = gr_open(db, "ix")
+    gr_put("a", "{\"s\":\"x\",\"v\":5}")
+    gr_put("b", "{\"s\":\"x\",\"v\":7}")
+    gr_put("c", "{\"s\":\"y\",\"v\":1}")
+    gr_commit()
+    gr_index_add("s", "v")
+    assert_eq_int(g_bcount["s\t\"x\""], 2, "bucket count x=2")
+    assert_eq_int(len(g_buckets["s\t\"x\""]), 2, "bucket ids x=2")
+    assert_eq_str(ix_fstr(g_breg["s\t\"x\"\tv"]), "12", "register sum x=12")
+    // update moves buckets and registers
+    gr_put("a", "{\"s\":\"y\",\"v\":10}")
+    assert_eq_int(g_bcount["s\t\"x\""], 1, "update: x count drops")
+    assert_eq_int(g_bcount["s\t\"y\""], 2, "update: y count grows")
+    assert_eq_str(ix_fstr(g_breg["s\t\"y\"\tv"]), "11", "update: y sum 11")
+    // delete maintains registers
+    gr_del("c")
+    gr_commit()
+    assert_eq_int(g_bcount["s\t\"y\""], 1, "del: y count drops")
+    assert_eq_str(ix_fstr(g_breg["s\t\"y\"\tv"]), "10", "del: y sum 10")
+    // declarations persist; rebuild after reopen matches
+    ok, errmsg = gr_open(db, "ix")
+    assert_eq_int(len(g_ifields), 1, "index decl persisted")
+    assert_eq_int(g_bcount["s\t\"x\""], 1, "rebuilt count x")
+    assert_eq_str(ix_fstr(g_breg["s\t\"y\"\tv"]), "10", "rebuilt register y")
+    // numeric tokens index too
+    gr_put("n1", "{\"k\":42,\"v\":1}")
+    gr_commit()
+    gr_index_add("k", "")
+    assert_eq_int(g_bcount["k\t42"], 1, "numeric token bucket")
+    assert_eq_str(ix_bucket("k", "42"), "k\t42", "ix_bucket resolves raw token")
+
+    // ix_fstr precision (the %g bug): big integral sums print exactly
+    assert_eq_str(ix_fstr(16649667.0), "16649667", "fstr big int exact")
+    assert_eq_str(ix_fstr(499.5), "499.5", "fstr fraction")
+    assert_eq_str(ix_fstr(0.0 - 2.25), "-2.25", "fstr negative")
+
     test_summary()
 }

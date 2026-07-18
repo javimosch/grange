@@ -6,15 +6,19 @@ grange is a document store written in pure [MFL](https://github.com/javimosch/ma
 
 - **Agent-first**: JSON-only stdout, typed errors on stderr, semantic exit codes (80–119), `guide` + `help-json` introspection, per [cli-specs](https://cli-specs.intrane.fr/). No human UI, ever.
 - **Crash-safe**: every commit is one immutable, checksummed WAL chunk. `kill -9` at any moment leaves exactly the committed prefix — proven by `make crash` (5 rounds of mid-flight SIGKILL, recovered counts are exact commit-batch multiples).
-- **Fast enough to matter** (100k docs, `make bench`, vs the SQLite builtin on the same box):
+- **Faster than SQLite on every indexed workload** (100k docs, `make bench`, both engines indexed on the same field, same box):
 
 | metric | grange | SQLite |
 |---|---|---|
-| bulk insert (batched commits) | **377k docs/s** | 50k rows/s |
-| point get (avg of 1000) | **3 µs** | 14 µs |
-| filtered scan, 100k docs | 67 ms | 5 ms (indexed) |
-| cold open, 100k on disk | 99 ms | — |
-| RSS after the run | 305 MB | — |
+| bulk insert, index maintained | **203k docs/s** | 45k rows/s |
+| point get (avg of 1000) | **5 µs** | 17 µs |
+| indexed count × 1000 | **<1 ms** (O(1) register) | 1,937 ms |
+| indexed find + fetch 33k docs | **5 ms** | 111 ms |
+| group-by count/sum/avg × 1000 | **<1 ms** (O(1) registers) | 51,456 ms |
+| full scan, no index (worst case) | 68 ms | 10 ms |
+| cold open, 100k + index rebuild | 266 ms | — |
+
+The one row SQLite wins is the unindexed scan (typed columns beat per-doc JSON extraction); the answer is `grange index` — one command, and that query class becomes O(1)/O(bucket) forever. Aggregate registers (declare `--sums` on an index) keep per-group count/sum/avg maintained incrementally at write time — a group-by answer costs a map lookup, which is why the agg row is not a typo.
 
 ## Model
 
@@ -35,6 +39,8 @@ grange get  --db ./data --id <id>
 grange find --db ./data --where status=active --limit 50
 grange del  --db ./data --id <id>
 grange count --db ./data --where status=active
+grange index --db ./data --field status --sums score   # declare once: find/count O(bucket|1), agg O(1)
+grange agg --db ./data --group-by status --sum score   # per-group count/sum/avg
 grange compact --db ./data        # fold WAL chunks into a fresh segment
 grange stats --db ./data
 grange guide                      # the machine-readable manual
@@ -60,10 +66,11 @@ make build    # needs machin >= 0.108
 make verify   # check + tests (21) + 100k bench + crash harness
 ```
 
-## M0 scope & honesty
+## Scope & honesty (M1)
 
-- Whole dataset lives in memory (memtable = the db); segments make cold open fast, not memory small. Memory overhead is currently ~3 KB/doc (MFL arena allocation) — an M1 target, honestly reported above.
-- `--where` is top-level equality only; durability is process-crash-exact, OS-crash best-effort (no fsync builtin in MFL yet).
-- Single process, single writer. The concurrent server (`grange serve`), secondary indexes, `agg`, and range queries are next.
+- Whole dataset + indexes live in memory (memtable = the db); segments make cold open fast, not memory small. Steady-state RSS at 100k docs + 1 index is ~120 MB (fresh process); the bench process peaks at ~440 MB from MFL arena temporaries — a memory diet is the standing target.
+- `--where` is top-level equality only; index buckets are equality buckets (no range queries yet). Aggregate registers cover count/sum/avg; min/max fall back to scan.
+- Durability is process-crash-exact (proven by `make crash`), OS-crash best-effort (no fsync builtin in MFL yet).
+- Single process, single writer. The concurrent server (`grange serve`) and range indexes are next.
 
 MIT.

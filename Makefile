@@ -1,5 +1,5 @@
 BIN = grange
-SRCS = framework/flags.src src/engine.src src/bench.src src/cli.src
+SRCS = framework/flags.src src/engine.src src/index.src src/bench.src src/cli.src
 
 build:
 	machin encode $(SRCS) > $(BIN).mfl
@@ -9,7 +9,7 @@ check:
 	machin check $(SRCS)
 
 test:
-	machin test src/engine.src tests/engine_test.src
+	machin test src/engine.src src/index.src tests/engine_test.src
 
 bench: build
 	rm -rf /tmp/grange-bench

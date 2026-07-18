@@ -1,6 +1,7 @@
 // grange bench — the 100k-record gate, run in-repo, JSON out.
-// Phases: bulk insert (batched commits) · point gets · filtered scan ·
-// compact · cold reopen · integrity. Optional --vs-sqlite comparison.
+// Fair fight: BOTH engines get an index on status. Phases: indexed bulk
+// insert · point gets · indexed count · indexed find+fetch · group-by agg ·
+// compact · cold reopen · integrity.
 
 func bench_rand(n) (v) {
     rb := rand_bytes(4)
@@ -28,9 +29,11 @@ func bench_rss_kb() (kb) {
 }
 
 func bench_grange(db, n, batch) (out) {
-    // 1) bulk insert
-    t0 := now_ms()
+    // 0) declare the index up front — inserts pay the maintenance cost honestly
     ok, errmsg := gr_open(db, "bench")
+    gr_index_add("status", "score")
+    // 1) indexed bulk insert
+    t0 := now_ms()
     i := 0
     while i < n {
         gr_put("k" + str(i), bench_doc(i))
@@ -49,37 +52,68 @@ func bench_grange(db, n, batch) (out) {
         i = i + 1
     }
     t_get := now_ms() - t0
-    // 3) filtered scan: status=paused over everything
+    // 3) indexed count: status=paused, 1000 times (it's O(1) — prove it)
     t0 = now_ms()
-    fields := []string{"status"}
-    vals := []string{"paused"}
+    cnt := 0
+    i = 0
+    while i < 1000 {
+        cnt = g_bcount[ix_bucket("status", "paused")]
+        i = i + 1
+    }
+    t_count := now_ms() - t0
+    // 4) indexed find+fetch: pull every status=paused doc, total the bytes
+    t0 = now_ms()
+    bucket := g_buckets[ix_bucket("status", "paused")]
+    fetched := 0
+    fbytes := 0
+    i = 0
+    while i < len(bucket) {
+        fbytes = fbytes + len(g_mem[bucket[i]])
+        fetched = fetched + 1
+        i = i + 1
+    }
+    t_find := now_ms() - t0
+    // 5) agg: group-by status, sum+avg score (register path, O(groups))
+    t0 = now_ms()
+    agg_runs := 0
+    sum_paused := 0.0
+    while agg_runs < 1000 {
+        sum_paused = g_breg["status\t\"paused\"\tscore"]
+        agg_runs = agg_runs + 1
+    }
+    t_agg := now_ms() - t0
+    // 6) unindexed full scan (kept for honesty — the no-index worst case)
+    t0 = now_ms()
+    fields := []string{"name"}
+    vals := []string{"user-777"}
     ids := keys(g_mem)
-    matches := 0
+    scan_matches := 0
     i = 0
     while i < len(ids) {
-        if wh_match(g_mem[ids[i]], fields, vals) == 1 { matches = matches + 1 }
+        if wh_match(g_mem[ids[i]], fields, vals) == 1 { scan_matches = scan_matches + 1 }
         i = i + 1
     }
     t_scan := now_ms() - t0
-    // 4) compact
+    // 7) compact + cold reopen (reopen rebuilds the index)
     t0 = now_ms()
     gr_compact()
     t_compact := now_ms() - t0
-    // 5) cold reopen from the compacted segment
     t0 = now_ms()
     ok, errmsg = gr_open(db, "bench")
     t_open := now_ms() - t0
-    // 6) integrity
     final := gr_count()
     ins_rate := 0
     if t_insert > 0 { ins_rate = n * 1000 / t_insert }
-    out = "{\"n\":" + str(n) + ",\"insert_ms\":" + str(t_insert) + ",\"insert_per_s\":" + str(ins_rate) + ",\"point_get_1000_ms\":" + str(t_get) + ",\"point_get_hits\":" + str(hits) + ",\"scan_ms\":" + str(t_scan) + ",\"scan_matches\":" + str(matches) + ",\"compact_ms\":" + str(t_compact) + ",\"cold_open_ms\":" + str(t_open) + ",\"final_count\":" + str(final) + ",\"integrity\":" + str(final == n) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}"
+    intact := 0
+    if final == n { intact = 1 }
+    out = "{\"n\":" + str(n) + ",\"insert_ms\":" + str(t_insert) + ",\"insert_per_s\":" + str(ins_rate) + ",\"point_get_1000_ms\":" + str(t_get) + ",\"point_get_hits\":" + str(hits) + ",\"count_1000_ms\":" + str(t_count) + ",\"count_result\":" + str(cnt) + ",\"find_fetch_ms\":" + str(t_find) + ",\"find_fetched\":" + str(fetched) + ",\"find_bytes\":" + str(fbytes) + ",\"agg_1000_ms\":" + str(t_agg) + ",\"agg_sum_paused\":" + ix_fstr(sum_paused) + ",\"noindex_scan_ms\":" + str(t_scan) + ",\"noindex_scan_matches\":" + str(scan_matches) + ",\"compact_ms\":" + str(t_compact) + ",\"cold_open_ms\":" + str(t_open) + ",\"final_count\":" + str(final) + ",\"integrity\":" + str(intact) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}"
 }
 
 func bench_sqlite(path, n, batch) (out) {
     remove(path)
     h := sqlite_open(path)
     sqlite_exec(h, "CREATE TABLE docs (id TEXT PRIMARY KEY, i INT, status TEXT, name TEXT, score INT)")
+    sqlite_exec(h, "CREATE INDEX idx_status ON docs(status)")
     t0 := now_ms()
     sqlite_exec(h, "BEGIN")
     i := 0
@@ -101,13 +135,36 @@ func bench_sqlite(path, n, batch) (out) {
     }
     t_get := now_ms() - t0
     t0 = now_ms()
-    rows := sqlite_query(h, "SELECT COUNT(*) AS c FROM docs WHERE status = ?", []string{"paused"})
+    cnt := ""
+    i = 0
+    while i < 1000 {
+        rows := sqlite_query(h, "SELECT COUNT(*) AS c FROM docs WHERE status = ?", []string{"paused"})
+        c, cerr := json_get(rows, "[0].c")
+        cnt = c
+        i = i + 1
+    }
+    t_count := now_ms() - t0
+    t0 = now_ms()
+    rows := sqlite_query(h, "SELECT * FROM docs WHERE status = ?", []string{"paused"})
+    fbytes := len(rows)
+    t_find := now_ms() - t0
+    t0 = now_ms()
+    agg := ""
+    i = 0
+    while i < 1000 {
+        arows := sqlite_query(h, "SELECT status, COUNT(*) AS c, SUM(score) AS s, AVG(score) AS a FROM docs GROUP BY status")
+        agg = arows
+        i = i + 1
+    }
+    t_agg := now_ms() - t0
+    t0 = now_ms()
+    srows := sqlite_query(h, "SELECT COUNT(*) AS c FROM docs WHERE name = ?", []string{"user-777"})
+    sm, smerr := json_get(srows, "[0].c")
     t_scan := now_ms() - t0
-    c, cerr := json_get(rows, "[0].c")
     sqlite_close(h)
     ins_rate := 0
     if t_insert > 0 { ins_rate = n * 1000 / t_insert }
-    out = "{\"n\":" + str(n) + ",\"insert_ms\":" + str(t_insert) + ",\"insert_per_s\":" + str(ins_rate) + ",\"point_get_1000_ms\":" + str(t_get) + ",\"scan_ms\":" + str(t_scan) + ",\"scan_matches\":" + c + "}"
+    out = "{\"n\":" + str(n) + ",\"insert_ms\":" + str(t_insert) + ",\"insert_per_s\":" + str(ins_rate) + ",\"point_get_1000_ms\":" + str(t_get) + ",\"count_1000_ms\":" + str(t_count) + ",\"count_result\":" + cnt + ",\"find_fetch_ms\":" + str(t_find) + ",\"find_bytes\":" + str(fbytes) + ",\"agg_1000_ms\":" + str(t_agg) + ",\"noindex_scan_ms\":" + str(t_scan) + ",\"noindex_scan_matches\":" + sm + "}"
 }
 
 func cmd_bench(fs) {

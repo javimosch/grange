@@ -151,6 +151,8 @@ func gr_open(db, coll) (ok, errmsg) {
     entries := list_dir(gr_dir())
     if len(entries) == 0 {
         // brand-new collection (or unreadable dir; mkdir above covers create)
+        ix_load()
+        ix_clear()
         ok = 1
         return
     }
@@ -204,11 +206,17 @@ func gr_open(db, coll) (ok, errmsg) {
         if cn >= g_next_chunk { g_next_chunk = cn + 1 }
         i = i + 1
     }
+    ix_load()
+    if len(g_ifields) > 0 { ix_rebuild() } else { ix_clear() }
     ok = 1
 }
 
 // gr_put stages a write (visible immediately; durable at gr_commit).
 func gr_put(id, doc) {
+    if len(g_ifields) > 0 {
+        if has(g_mem, id) { ix_remove(id, g_mem[id]) }
+        ix_add(id, doc)
+    }
     g_mem[id] = doc
     g_pend = append(g_pend, "p|" + id)
     g_pend = append(g_pend, doc)
@@ -218,7 +226,10 @@ func gr_put(id, doc) {
 // gr_del stages a delete. Returns 1 if the id existed.
 func gr_del(id) (existed) {
     existed = 0
-    if has(g_mem, id) { existed = 1 }
+    if has(g_mem, id) {
+        existed = 1
+        if len(g_ifields) > 0 { ix_remove(id, g_mem[id]) }
+    }
     delete(g_mem, id)
     g_pend = append(g_pend, "d|" + id)
     g_pend_recs = g_pend_recs + 1
