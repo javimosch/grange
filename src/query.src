@@ -43,8 +43,13 @@ func valid_doc(doc) (ok) {
 }
 
 // ---- filter matching ----
-// --where "status=active,score>=100" — comma-separated clauses, ANDed.
-// Ops: = (string/number/bool equality) and > < >= <= (numeric).
+// --where "status=active,score>=100,title~=acme" — comma-separated clauses, ANDed.
+// Ops: = (equality), ~= (substring contains), > < >= <= (numeric).
+
+func wh_unquote(tok) (s) {
+    s = tok
+    if len(tok) >= 2 && substr(tok, 0, 1) == "\"" { s = substr(tok, 1, len(tok) - 1) }
+}
 
 func wh_pairs(wh) (fields, ops, vals) {
     fields = []string{}
@@ -61,6 +66,8 @@ func wh_pairs(wh) (fields, ops, vals) {
         cut = index(p, ">=")
         if cut > 0 { op = ">=" }
         if len(op) == 0 { cut = index(p, "<=")  if cut > 0 { op = "<=" } }
+        // ~= must be detected before bare "=" (otherwise subject~=x → field "subject~")
+        if len(op) == 0 { cut = index(p, "~=")  if cut > 0 { op = "~=" } }
         if len(op) == 0 { oplen = 1  cut = index(p, ">")  if cut > 0 { op = ">" } }
         if len(op) == 0 { cut = index(p, "<")  if cut > 0 { op = "<" } }
         if len(op) == 0 { cut = index(p, "=")  if cut > 0 { op = "=" } }
@@ -82,12 +89,18 @@ func wh_match(doc, fields, ops, vals) (m) {
         if ops[i] == "=" {
             if got != vals[i] && got != "\"" + vals[i] + "\"" { m = 0  return }
         } else {
-            dv := ix_tok_num(got)
-            wv := parse_float(vals[i])
-            if ops[i] == ">" && (dv > wv) == false { m = 0  return }
-            if ops[i] == "<" && (dv < wv) == false { m = 0  return }
-            if ops[i] == ">=" && (dv >= wv) == false { m = 0  return }
-            if ops[i] == "<=" && (dv <= wv) == false { m = 0  return }
+            if ops[i] == "~=" {
+                hay := to_lower(wh_unquote(got))
+                needle := to_lower(wh_unquote(vals[i]))
+                if len(needle) == 0 || contains(hay, needle) == false { m = 0  return }
+            } else {
+                dv := ix_tok_num(got)
+                wv := parse_float(vals[i])
+                if ops[i] == ">" && (dv > wv) == false { m = 0  return }
+                if ops[i] == "<" && (dv < wv) == false { m = 0  return }
+                if ops[i] == ">=" && (dv >= wv) == false { m = 0  return }
+                if ops[i] == "<=" && (dv <= wv) == false { m = 0  return }
+            }
         }
         i = i + 1
     }
