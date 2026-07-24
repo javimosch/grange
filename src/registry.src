@@ -202,6 +202,75 @@ func gr_apply_live(lines) (recs) {
     }
 }
 
+// gr_reset hard-resets grange's in-memory state, commits any pending writes,
+// then frees the MFL arena. Use in long-running single-actor servers when the
+// current goroutine's arena would otherwise grow forever (machin #523). After
+// reset, all collections are reloaded from disk on next gr_use. Safe because
+// grange keeps durable data on disk and the registry only caches live maps.
+func gr_reset() (ok) {
+    ok = 0
+    if g_pend_recs > 0 {
+        if gr_commit() == 0 { return }
+    }
+    // Drop every live reference to arena-allocated strings/slices. The maps
+    // themselves are malloc-backed, but their keys/values are pointers into
+    // the soon-to-be-freed arena. Reassigning the variables makes the old
+    // maps unreachable and safe to leave to the OS/malloc after arena_reset.
+    g_db = ""
+    g_coll = ""
+    g_mem = make(map[string]string)
+    g_gen = 0
+    g_next_chunk = 0
+    g_pend = []string{}
+    g_pend_recs = 0
+    g_pend_ops = []string{}
+    g_skipped_chunks = 0
+    g_replayed_chunks = 0
+    g_ttl = make(map[string]int)
+    g_seq = 0
+    g_seq_base = 0
+    g_chg = []string{}
+    g_cold = 0
+    g_tomb = make(map[string]int)
+    g_run_rid = []int{}
+    g_run_pages = []int{}
+    g_run_count = []int{}
+    g_ifields = []string{}
+    g_isums = make(map[string]string)
+    g_ikind = make(map[string]string)
+    g_buckets = make(map[string][]string)
+    g_bcount = make(map[string]int)
+    g_breg = make(map[string]float)
+    g_rvals = make(map[string][]float)
+    g_rids = make(map[string][]string)
+    g_rdirty = make(map[string]int)
+    R_loaded = make(map[string]int)
+    R_mem = make(map[string]map[string]string)
+    R_gen = make(map[string]int)
+    R_next = make(map[string]int)
+    R_ifields = make(map[string][]string)
+    R_isums = make(map[string]map[string]string)
+    R_ikind = make(map[string]map[string]string)
+    R_buckets = make(map[string]map[string][]string)
+    R_bcount = make(map[string]map[string]int)
+    R_breg = make(map[string]map[string]float)
+    R_rvals = make(map[string]map[string][]float)
+    R_rids = make(map[string]map[string][]string)
+    R_rdirty = make(map[string]map[string]int)
+    R_ttl = make(map[string]map[string]int)
+    R_seq = make(map[string]int)
+    R_seqbase = make(map[string]int)
+    R_chg = make(map[string][]string)
+    R_cold = make(map[string]int)
+    R_tomb = make(map[string]map[string]int)
+    R_runrid = make(map[string][]int)
+    R_runpages = make(map[string][]int)
+    R_runcount = make(map[string][]int)
+    g_touch = make(map[string]int)
+    arena_reset()
+    ok = 1
+}
+
 // gr_refresh catches up with chunks another PROCESS appended to this
 // collection's directory (the immutable WAL doubles as a replication log).
 // Same generation: replay only chunks >= g_next_chunk, live. New generation
