@@ -2,6 +2,25 @@
 // The serve loop parks a no-news watcher's fd and wakes it from watch_tick(),
 // so long-polling costs zero goroutines (see serve.src).
 
+var g_rss_last = 0
+
+func srv_rss_watchdog() {
+    nowms := now_ms()
+    if nowms - g_rss_last < 10000 { return }
+    g_rss_last = nowms
+    maxmb := parse_int(env("GRANGE_MAX_RSS_MB"))
+    if maxmb == 0 { maxmb = 300 }
+    rss := bench_rss_kb()
+    if rss < maxmb * 1024 { return }
+    // over budget: flush state and let systemd restart us — the crash-safe WAL
+    // makes a restart a cheap arena reset, and eviction bounds what reloads
+    write(2, "{\"event\":\"rss_restart\",\"rss_kb\":" + str(rss) + ",\"max_mb\":" + str(maxmb) + ",\"loaded\":" + str(len(keys(R_loaded))) + "}\n")
+    gr_commit()
+    uok, uerr := gr_use(g_srv_db, "_sys")
+    if uok == 1 { tn_rl_flush()  gr_commit() }
+    exit(0)
+}
+
 // watch_payload renders changes after `since` for the CURRENT collection.
 func watch_payload(since) (data) {
     items := []string{}
