@@ -133,18 +133,30 @@ func q_cold_scan(fields, ops, vals, limit, countonly) (items, n) {
     maxp := cold_maxp()
     k := 0
     while k < maxp {
-        grp := cold_group(k, maxp)
-        gids := keys(grp)
-        i := 0
-        while i < len(gids) {
-            if countonly == 0 && limit > 0 && n >= limit { return }
-            if wh_match(grp[gids[i]], fields, ops, vals) == 1 {
-                if countonly == 0 {
-                    items = append(items, "{\"id\":\"" + jesc(gids[i]) + "\",\"doc\":" + grp[gids[i]] + "}")
+        if countonly == 1 {
+            // nothing built here outlives the group, so the pages it read are
+            // reclaimed at the end of the block (verified by ARENA001)
+            arena {
+                grp := cold_group(k, maxp)
+                gids := keys(grp)
+                i := 0
+                while i < len(gids) {
+                    if wh_match(grp[gids[i]], fields, ops, vals) == 1 { n = n + 1 }
+                    i = i + 1
                 }
-                n = n + 1
             }
-            i = i + 1
+        } else {
+            grp := cold_group(k, maxp)
+            gids := keys(grp)
+            i := 0
+            while i < len(gids) {
+                if limit > 0 && n >= limit { return }
+                if wh_match(grp[gids[i]], fields, ops, vals) == 1 {
+                    items = append(items, "{\"id\":\"" + jesc(gids[i]) + "\",\"doc\":" + grp[gids[i]] + "}")
+                    n = n + 1
+                }
+                i = i + 1
+            }
         }
         k = k + 1
     }
@@ -154,6 +166,11 @@ func q_find(wh, limit) (data) {
     gr_sweep_expired()
     fields, ops, vals := wh_pairs(wh)
     if g_cold == 1 {
+        xitems, xn, xused := q_cold_index(fields, ops, vals, limit, 0)
+        if xused == 1 {
+            data = "{\"count\":" + str(xn) + ",\"mode\":\"cold-index\",\"items\":[" + join(xitems, ",") + "]}"
+            return
+        }
         items, n := q_cold_scan(fields, ops, vals, limit, 0)
         data = "{\"count\":" + str(n) + ",\"mode\":\"cold-scan\",\"items\":[" + join(items, ",") + "]}"
         return
@@ -199,6 +216,11 @@ func q_count(wh) (data) {
         return
     }
     if g_cold == 1 {
+        xitems, xn, xused := q_cold_index(fields, ops, vals, 0, 1)
+        if xused == 1 {
+            data = "{\"count\":" + str(xn) + ",\"mode\":\"cold-index\"}"
+            return
+        }
         items, n := q_cold_scan(fields, ops, vals, 0, 1)
         data = "{\"count\":" + str(n) + ",\"mode\":\"cold-scan\"}"
         return

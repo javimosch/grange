@@ -28,3 +28,48 @@ rollback.
 on the edge VPS** (`du -sb data data.tenants`), or earlier if a tenant's
 latency-tolerant dataset alone approaches the free-disk margin. Until then:
 single instance, no action.
+
+## Memory behaviour in a long-lived server (measured 2026-07-27)
+
+machin reclaims a goroutine's arena when that goroutine **returns**. grange's
+server is a single actor whose accept loop never returns, so every allocation it
+makes — page reads, parsed lines, built responses — stays resident until the
+process exits. This is not a leak in the C sense (nothing is unreachable-but-
+tracked); it is arena semantics meeting an infinite loop.
+
+Measured on 50k docs in one process (`stats` reports `rss_kb`, so the numbers are
+self-reported, not guessed from a PID):
+
+| phase | RSS after |
+|---|---|
+| 50k hot writes (the working set itself) | 68 MB |
+| convert to cold + flush to pages | +4 MB |
+| build a cold index over 50k docs | +49 MB |
+| 200 cold point gets | +11 MB (~55 kB/get) |
+| 10 indexed counts | +94 MB (~9 MB/query) |
+| 5 scanning counts | +16 MB (~3 MB/scan) |
+
+Two corrections to earlier notes: the "flat 4.4 MB at 200k docs" figure was a
+**fresh process** (open + count), which is genuinely small but says nothing about
+a server under load; and a `pgrep -f "grange serve …"` in an earlier harness
+matched the measuring shell instead of the server, which produced both absurdly
+large and absurdly small readings. Always read `stats.rss_kb`.
+
+Mitigations in place:
+- Every path where nothing escapes is wrapped in `arena { }` (flush, index
+  build, count scans, indexed counts) — verified by machin's ARENA001 escape
+  analysis, which refuses the wrap if a value would outlive the block. This
+  roughly halved growth on those paths.
+- The RSS watchdog checks every 10 s and, above `GRANGE_MAX_RSS_MB` (100 on the
+  hosted primary), commits, flushes throttle counters and exits; systemd
+  restarts in ~2 s. Recovery is a WAL replay for hot collections and a manifest
+  read for cold ones, so a restart costs milliseconds and loses nothing.
+- Parked `/watch` clients are dropped by a restart and must reconnect (the SDKs
+  poll again with their last `seq`, which is the normal long-poll cycle).
+
+Next engine milestone: per-request arena scoping. Either handle each request in
+a short-lived goroutine (machweb's own `serve` does this — but it trades the
+single-actor race-freedom property) or extend ARENA001 to prove escapes
+interprocedurally so the whole read path can be wrapped. Until then the
+watchdog is the guard, and a request-heavy instance should be sized with the
+restart in mind.

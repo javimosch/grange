@@ -111,8 +111,18 @@ disk-resident: hash-partitioned page files (the same checksummed write-once
 format), a bounded memtable, and streaming scans. Measured at 200k docs: **4.4 MB
 RSS vs 89.9 MB hot** in a fresh process, point gets read exactly one page file
 per run (3 ms cold-start included), scans and compaction stream one page group
-at a time. Trade-offs, enforced: no secondary indexes or TTL docs on cold
-collections (aggregate scans still work), and gets go from ~µs to ~100 µs.
+at a time. **Cold collections take secondary indexes too** (`grange index --coll archive
+--field email`): the index is written as value-partitioned page files, so an
+equality lookup reads ONE index page plus only the data pages holding its
+candidates. Measured at 100k cold docs: a selective lookup goes **112 ms → 7 ms
+(15×)**, a 2000-hit lookup 108 ms → 66 ms, and building an index over 100k docs
+takes ~0.9 s per field. Candidates are always re-verified against the
+authoritative doc, so a stale index entry (overwritten, moved or deleted doc)
+can never leak into results.
+
+Trade-offs, enforced: no TTL docs on cold collections, range/`~=` clauses still
+scan (only equality clauses use the index), `stats` reports `docs_estimate`
+(an exact cold count streams every page), and gets go from ~µs to ~100 µs.
 Hot stays the default — cold is for data bigger than your RAM budget.
 
 ## Read replicas
@@ -138,7 +148,14 @@ make verify   # check + tests (69) + 100k bench + crash harness
 
 ## Scope & honesty (M5)
 
-- Whole dataset + indexes live in memory (memtable = the db); segments make cold open fast, not memory small. Steady-state RSS at 100k docs + 1 index is ~120 MB (fresh process); the bench process peaks at ~440 MB from MFL arena temporaries — a memory diet is the standing target.
+- A long-lived server's RSS grows with the work it has done (see
+  [docs/OPERATIONS.md](docs/OPERATIONS.md)): machin reclaims a goroutine's arena
+  when it returns, and the single-actor loop never returns, so page reads and
+  response building accumulate. Hot paths that can be arena-scoped are, and the
+  RSS watchdog (`GRANGE_MAX_RSS_MB`) restarts the process before it hurts —
+  crash-safety makes that a non-event. Per-request arena scoping is the next
+  engine milestone.
+- Hot collections keep the whole dataset + indexes in memory (memtable = the db); segments make cold open fast, not memory small. Steady-state RSS at 100k docs + 1 index is ~120 MB (fresh process); the bench process peaks at ~440 MB from MFL arena temporaries — a memory diet is the standing target.
 - `--where` supports equality + numeric ranges. Equality clauses use buckets; a single range clause on a `--range` field uses the sorted projection (built lazily on the first range query after a write — the build cost is the first query's, honestly). Multi-clause range queries scan. Aggregate registers cover count/sum/avg; `--minmax` computes min/max on the scan path.
 - Durability is process-crash-exact (proven by `make crash`), OS-crash best-effort (no fsync builtin in MFL yet).
 - `grange serve` handles one request at a time (correctness first) across any number of collections and tenants. Metering charges storage only (no per-query fees yet); billing sweeps piggyback on requests every 6h. Concurrent readers are next.

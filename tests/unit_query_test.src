@@ -1,0 +1,119 @@
+// unit: query layer — filter parsing, matching, JSON escaping, validation.
+// Pure functions only: no db, no disk.
+
+func uq_pairs_ops() {
+    f, o, v := wh_pairs("a=1")
+    assert_eq_int(len(f), 1, "one clause parsed")
+    assert_eq_str(o[0], "=", "op =")
+    assert_eq_str(v[0], "1", "val 1")
+    f, o, v = wh_pairs("a>=1,b<=2,c>3,d<4,e=5")
+    assert_eq_int(len(f), 5, "five clauses")
+    assert_eq_str(o[0], ">=", "op >=")
+    assert_eq_str(o[1], "<=", "op <=")
+    assert_eq_str(o[2], ">", "op >")
+    assert_eq_str(o[3], "<", "op <")
+    assert_eq_str(o[4], "=", "op = last")
+    assert_eq_str(v[1], "2", "val after <=")
+    // empty and malformed inputs are dropped, not crashed on
+    f, o, v = wh_pairs("")
+    assert_eq_int(len(f), 0, "empty where = no clauses")
+    f, o, v = wh_pairs("noop")
+    assert_eq_int(len(f), 0, "clause without operator ignored")
+    f, o, v = wh_pairs("=5")
+    assert_eq_int(len(f), 0, "operator at position 0 ignored (no field)")
+    // substring operator
+    f, o, v = wh_pairs("name~=ada")
+    assert_eq_int(len(f), 1, "~= parsed")
+    assert_eq_str(o[0], "~=", "op ~=")
+    assert_eq_str(v[0], "ada", "val for ~=")
+}
+
+func uq_match_equality() {
+    f, o, v := wh_pairs("s=x")
+    assert_eq_int(wh_match("{\"s\":\"x\"}", f, o, v), 1, "string equality matches")
+    assert_eq_int(wh_match("{\"s\":\"y\"}", f, o, v), 0, "string equality rejects")
+    assert_eq_int(wh_match("{\"other\":1}", f, o, v), 0, "missing field rejects")
+    f, o, v = wh_pairs("n=42")
+    assert_eq_int(wh_match("{\"n\":42}", f, o, v), 1, "numeric equality matches raw token")
+    f, o, v = wh_pairs("b=true")
+    assert_eq_int(wh_match("{\"b\":true}", f, o, v), 1, "bool equality matches")
+}
+
+func uq_match_ranges() {
+    f, o, v := wh_pairs("n>=10")
+    assert_eq_int(wh_match("{\"n\":10}", f, o, v), 1, ">= boundary inclusive")
+    assert_eq_int(wh_match("{\"n\":9}", f, o, v), 0, ">= below rejects")
+    f, o, v = wh_pairs("n>10")
+    assert_eq_int(wh_match("{\"n\":10}", f, o, v), 0, "> boundary exclusive")
+    assert_eq_int(wh_match("{\"n\":11}", f, o, v), 1, "> above matches")
+    f, o, v = wh_pairs("n<=10")
+    assert_eq_int(wh_match("{\"n\":10}", f, o, v), 1, "<= boundary inclusive")
+    f, o, v = wh_pairs("n<10")
+    assert_eq_int(wh_match("{\"n\":10}", f, o, v), 0, "< boundary exclusive")
+    // negatives and floats
+    f, o, v = wh_pairs("n>=-5")
+    assert_eq_int(wh_match("{\"n\":-1}", f, o, v), 1, "negative range compare")
+    assert_eq_int(wh_match("{\"n\":-6}", f, o, v), 0, "negative range rejects")
+    f, o, v = wh_pairs("n<2.5")
+    assert_eq_int(wh_match("{\"n\":2.25}", f, o, v), 1, "float compare")
+    // numeric ops against a quoted numeric string still compare numerically
+    f, o, v = wh_pairs("n>=10")
+    assert_eq_int(wh_match("{\"n\":\"12\"}", f, o, v), 1, "quoted numeric compares numerically")
+}
+
+func uq_match_substring() {
+    f, o, v := wh_pairs("s~=da")
+    assert_eq_int(wh_match("{\"s\":\"ada\"}", f, o, v), 1, "~= finds substring")
+    assert_eq_int(wh_match("{\"s\":\"bob\"}", f, o, v), 0, "~= rejects non-substring")
+    assert_eq_int(wh_match("{\"s\":\"ADA\"}", f, o, v), 1, "~= is case-insensitive")
+    // an empty needle matches NOTHING (a typo'd filter must not match everything)
+    f, o, v = wh_pairs("s~=")
+    assert_eq_int(wh_match("{\"s\":\"ada\"}", f, o, v), 0, "empty ~= needle matches nothing")
+}
+
+func uq_match_conjunction() {
+    f, o, v := wh_pairs("s=x,n>=5")
+    assert_eq_int(wh_match("{\"s\":\"x\",\"n\":5}", f, o, v), 1, "AND both true")
+    assert_eq_int(wh_match("{\"s\":\"x\",\"n\":4}", f, o, v), 0, "AND second false")
+    assert_eq_int(wh_match("{\"s\":\"z\",\"n\":9}", f, o, v), 0, "AND first false")
+    // no clauses matches everything (the "" where case)
+    f, o, v = wh_pairs("")
+    assert_eq_int(wh_match("{\"anything\":1}", f, o, v), 1, "no clauses matches all")
+}
+
+func uq_escaping() {
+    assert_eq_str(jesc("plain"), "plain", "jesc passes plain text")
+    assert_eq_str(jesc("a\"b"), "a\\\"b", "jesc escapes quote")
+    assert_eq_str(jesc("a\\b"), "a\\\\b", "jesc escapes backslash")
+    assert_eq_str(jesc("a\nb"), "a\\nb", "jesc escapes newline")
+    assert_eq_str(jesc("a\tb"), "a\\tb", "jesc escapes tab")
+    assert_eq_str(wh_unquote("\"x\""), "x", "wh_unquote strips quotes")
+    assert_eq_str(wh_unquote("42"), "42", "wh_unquote leaves raw token")
+    assert_eq_str(wh_unquote(""), "", "wh_unquote handles empty")
+}
+
+func uq_validation() {
+    assert_eq_int(valid_id("ok-id_1"), 1, "plain id valid")
+    assert_eq_int(valid_id("user@example.com"), 1, "email id valid")
+    assert_eq_int(valid_id(""), 0, "empty id invalid")
+    assert_eq_int(valid_id("a|b"), 0, "pipe id invalid (record separator)")
+    assert_eq_int(valid_id("a/b"), 0, "slash id invalid (path)")
+    assert_eq_int(valid_id("a\nb"), 0, "newline id invalid")
+    assert_eq_int(valid_doc("{\"a\":1}"), 1, "object doc valid")
+    assert_eq_int(valid_doc("[1,2]"), 1, "array doc valid")
+    assert_eq_int(valid_doc(""), 0, "empty doc invalid")
+    assert_eq_int(valid_doc("42"), 0, "scalar doc invalid")
+    assert_eq_int(valid_doc("{\"a\":\n1}"), 0, "multiline doc invalid")
+    assert_eq_int(valid_doc("{\"a\":\t1}"), 0, "tab doc invalid (index separator)")
+}
+
+func main() {
+    uq_pairs_ops()
+    uq_match_equality()
+    uq_match_ranges()
+    uq_match_substring()
+    uq_match_conjunction()
+    uq_escaping()
+    uq_validation()
+    test_summary()
+}

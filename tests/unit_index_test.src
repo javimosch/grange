@@ -1,0 +1,135 @@
+// unit: hot indexes (buckets + aggregate registers), range projection,
+// numeric/format helpers. Uses a scratch db for the bucket-maintenance cases.
+
+func ui_dir() (d) {
+    d = "/tmp/grange-ut-index-" + str(now_ms())
+}
+
+func ui_fstr() {
+    assert_eq_str(ix_fstr(0.0), "0", "fstr zero")
+    assert_eq_str(ix_fstr(7.0), "7", "fstr integral")
+    // %g would print 1.66497e+07 here — the register sums must stay exact
+    assert_eq_str(ix_fstr(16649667.0), "16649667", "fstr big integral exact")
+    assert_eq_str(ix_fstr(499.5), "499.5", "fstr one decimal")
+    assert_eq_str(ix_fstr(0.0 - 2.25), "-2.25", "fstr negative")
+    assert_eq_str(ix_fstr(0.000001), "0.000001", "fstr 6th decimal kept")
+    assert_eq_str(ix_fstr(2.9999999), "3", "fstr rounds up at the 7th decimal")
+}
+
+func ui_tokens() {
+    assert_eq_str(ix_field_tok("{\"a\":1}", "a"), "1", "token for number")
+    assert_eq_str(ix_field_tok("{\"a\":\"x\"}", "a"), "\"x\"", "token keeps quotes for strings")
+    assert_eq_str(ix_field_tok("{\"a\":1}", "missing"), "", "absent field = empty token")
+    assert_eq_str(ix_fstr(ix_tok_num("42")), "42", "tok_num raw number")
+    assert_eq_str(ix_fstr(ix_tok_num("\"42\"")), "42", "tok_num quoted number")
+    assert_eq_str(ix_fstr(ix_tok_num("\"abc\"")), "0", "tok_num non-numeric = 0")
+}
+
+func ui_buckets_and_registers() {
+    db := ui_dir()
+    ok, errmsg := gr_open(db, "c")
+    gr_put("a", "{\"s\":\"x\",\"v\":5}")
+    gr_put("b", "{\"s\":\"x\",\"v\":7}")
+    gr_put("c", "{\"s\":\"y\",\"v\":1}")
+    gr_commit()
+    assert_eq_int(gr_index_add("s", "v", ""), 1, "declare index with sum register")
+    assert_eq_int(g_bcount["s\t\"x\""], 2, "bucket count")
+    assert_eq_str(ix_fstr(g_breg["s\t\"x\"\tv"]), "12", "register sums both docs")
+    assert_eq_int(ix_is_indexed("s"), 1, "field reported indexed")
+    assert_eq_int(ix_is_indexed("nope"), 0, "other field not indexed")
+    // an overwrite must move the doc between buckets AND fix both registers
+    gr_put("a", "{\"s\":\"y\",\"v\":10}")
+    assert_eq_int(g_bcount["s\t\"x\""], 1, "old bucket decremented on overwrite")
+    assert_eq_int(g_bcount["s\t\"y\""], 2, "new bucket incremented on overwrite")
+    assert_eq_str(ix_fstr(g_breg["s\t\"x\"\tv"]), "7", "old register loses the moved value")
+    assert_eq_str(ix_fstr(g_breg["s\t\"y\"\tv"]), "11", "new register gains it")
+    // a delete must decrement both
+    gr_del("c")
+    assert_eq_int(g_bcount["s\t\"y\""], 1, "delete decrements bucket")
+    assert_eq_str(ix_fstr(g_breg["s\t\"y\"\tv"]), "10", "delete decrements register")
+    // an idempotent re-declare must not double-count
+    assert_eq_int(gr_index_add("s", "v", ""), 1, "re-declare same field")
+    assert_eq_int(len(g_ifields), 1, "no duplicate field declaration")
+    assert_eq_int(g_bcount["s\t\"y\""], 1, "rebuild is not additive")
+    // declarations survive a reopen and rebuild identically
+    gr_commit()
+    ok, errmsg = gr_open(db, "c")
+    assert_eq_int(len(g_ifields), 1, "declaration persisted")
+    assert_eq_str(ix_fstr(g_breg["s\t\"y\"\tv"]), "10", "register rebuilt on open")
+    // ix_bucket resolves user input to the stored token form
+    assert_eq_str(ix_bucket("s", "y"), "s\t\"y\"", "bucket key for string value")
+    gr_put("n1", "{\"k\":42}")
+    gr_commit()
+    assert_eq_int(gr_index_add("k", "", ""), 1, "index numeric field")
+    assert_eq_str(ix_bucket("k", "42"), "k\t42", "bucket key for numeric value")
+    assert_eq_str(ix_bucket("k", "nosuch"), "k\t\"nosuch\"", "unknown value falls back to quoted form")
+}
+
+func ui_range_projection() {
+    db := ui_dir()
+    ok, errmsg := gr_open(db, "r")
+    i := 0
+    while i < 50 {
+        gr_put("m" + str(i), "{\"v\":" + str(i) + "}")
+        i = i + 1
+    }
+    gr_commit()
+    assert_eq_int(gr_index_add("v", "", "range"), 1, "declare range index")
+    rb_ensure("v")
+    assert_eq_int(len(g_rvals["v"]), 50, "projection covers every doc")
+    // sorted invariant across the whole projection
+    sorted := 1
+    i = 1
+    while i < len(g_rvals["v"]) {
+        if g_rvals["v"][i] < g_rvals["v"][i-1] { sorted = 0 }
+        i = i + 1
+    }
+    assert_eq_int(sorted, 1, "projection is ascending")
+    // binary-search bounds on every operator, including empty results
+    lo, hi := rb_bounds("v", ">=", "45")
+    assert_eq_int(hi - lo, 5, ">= bound counts 45..49")
+    lo, hi = rb_bounds("v", ">", "45")
+    assert_eq_int(hi - lo, 4, "> bound excludes 45")
+    lo, hi = rb_bounds("v", "<", "5")
+    assert_eq_int(hi - lo, 5, "< bound counts 0..4")
+    lo, hi = rb_bounds("v", "<=", "5")
+    assert_eq_int(hi - lo, 6, "<= bound includes 5")
+    lo, hi = rb_bounds("v", ">=", "1000")
+    assert_eq_int(hi - lo, 0, "bound above max is empty")
+    lo, hi = rb_bounds("v", "<", "-1")
+    assert_eq_int(hi - lo, 0, "bound below min is empty")
+    // a write invalidates and the next query rebuilds with the new doc
+    gr_put("extra", "{\"v\":999}")
+    gr_commit()
+    assert_eq_int(g_rdirty["v"], 1, "write marks projection dirty")
+    rb_ensure("v")
+    assert_eq_int(len(g_rvals["v"]), 51, "rebuild picks up the new doc")
+    lo, hi = rb_bounds("v", ">=", "999")
+    assert_eq_int(hi - lo, 1, "new doc is findable by range")
+}
+
+func ui_msort() {
+    // duplicates and reverse order are the merge-sort edge cases
+    vals := []float{3.0, 1.0, 2.0, 1.0}
+    ids := []string{"c", "a", "b", "a2"}
+    sv, si := rb_msort(vals, ids)
+    assert_eq_int(len(sv), 4, "msort keeps every element")
+    assert_eq_str(ix_fstr(sv[0]), "1", "msort first")
+    assert_eq_str(ix_fstr(sv[1]), "1", "msort duplicate kept adjacent")
+    assert_eq_str(ix_fstr(sv[3]), "3", "msort last")
+    assert_eq_int(len(si), 4, "ids carried alongside values")
+    // single element and empty input must not crash
+    one_v, one_i := rb_msort([]float{5.0}, []string{"x"})
+    assert_eq_str(ix_fstr(one_v[0]), "5", "msort single element")
+    zero_v, zero_i := rb_msort([]float{}, []string{})
+    assert_eq_int(len(zero_v), 0, "msort empty input")
+}
+
+func main() {
+    ui_fstr()
+    ui_tokens()
+    ui_buckets_and_registers()
+    ui_range_projection()
+    ui_msort()
+    test_summary()
+}

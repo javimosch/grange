@@ -1,0 +1,92 @@
+// unit: tenancy — storage accrual math, the fair-use rate limiter and its
+// traceability counters, token/path helpers.
+
+func ut_accrual() {
+    free := 52428800
+    // 1 GB above the free tier for 30 days at 15c/GB/month = exactly 15c
+    assert(tn_accrue_cents(1000000000 + free, 30 * 86400000, 15, free) > 14.999, "1GB/30d >= 15c")
+    assert(tn_accrue_cents(1000000000 + free, 30 * 86400000, 15, free) < 15.001, "1GB/30d <= 15c")
+    // linear in time: half a GB for one day = 0.25c
+    day := tn_accrue_cents(500000000 + free, 86400000, 15, free)
+    assert(day > 0.2499 && day < 0.2501, "0.5GB/1d = 0.25c")
+    // linear in size: doubling billable bytes doubles the accrual
+    a := tn_accrue_cents(free + 1000000000, 86400000, 15, free)
+    b := tn_accrue_cents(free + 2000000000, 86400000, 15, free)
+    assert(b > a * 1.999 && b < a * 2.001, "accrual is linear in bytes")
+    // the free tier and its boundary cost nothing
+    assert_eq_str(ix_fstr(tn_accrue_cents(free, 86400000, 15, free)), "0", "exactly free tier = 0")
+    assert_eq_str(ix_fstr(tn_accrue_cents(free - 1, 86400000, 15, free)), "0", "below free tier = 0")
+    assert_eq_str(ix_fstr(tn_accrue_cents(0, 86400000, 15, free)), "0", "empty tenant = 0")
+    // degenerate time never bills (a clock that goes backwards must not charge)
+    assert_eq_str(ix_fstr(tn_accrue_cents(free + 1000000000, 0, 15, free)), "0", "zero elapsed = 0")
+    assert_eq_str(ix_fstr(tn_accrue_cents(free + 1000000000, 0 - 5000, 15, free)), "0", "negative elapsed = 0")
+    // price is a parameter, not a constant
+    p30 := tn_accrue_cents(free + 1000000000, 30 * 86400000, 30, free)
+    assert(p30 > 29.99 && p30 < 30.01, "price parameter scales the accrual")
+}
+
+func ut_rate_limiter() {
+    lim := tn_rate_limit()
+    assert(lim > 0, "a rate limit is always configured")
+    tid := "tunit" + str(now_ms())
+    // requests up to the cap pass
+    i := 0
+    passed := 0
+    while i < lim {
+        if tn_rl_check(tid) == 0 { passed = passed + 1 }
+        i = i + 1
+    }
+    assert_eq_int(passed, lim, "every request up to the cap passes")
+    // the next ones are throttled and counted
+    assert_eq_int(tn_rl_check(tid), 1, "over the cap is throttled")
+    assert_eq_int(tn_rl_check(tid), 1, "still throttled inside the window")
+    assert_eq_int(g_rl_hits[tid], 2, "throttle hits are counted for traceability")
+    // retry_after is a sane hint (never 0, never beyond the window)
+    ra := tn_rl_retry_after(tid)
+    assert(ra >= 1 && ra <= 60, "retry_after within the window")
+    // tenants are independent: a second tenant is unaffected
+    other := "tother" + str(now_ms())
+    assert_eq_int(tn_rl_check(other), 0, "a different tenant is not throttled")
+    assert_eq_int(g_rl_hits[other], 0, "and has no throttle hits")
+    // a new window resets the counter (simulated by rewinding the window mark)
+    g_rl_win[tid] = now_ms() - 61000
+    assert_eq_int(tn_rl_check(tid), 0, "the next window admits requests again")
+}
+
+func ut_rl_persistence() {
+    db := "/tmp/grange-ut-tenant-" + str(now_ms())
+    g_srv_db = db
+    ok, errmsg := gr_open(db, "_sys")
+    tid := "tflush" + str(now_ms())
+    g_rl_hits[tid] = 3
+    tn_rl_flush()
+    assert_eq_int(g_rl_hits[tid], 0, "flush clears the in-memory counter")
+    rec, found := gr_get("rl-" + tid)
+    assert_eq_int(found, 1, "flush persists a counter doc")
+    tv, terr := json_get(rec, ".throttled_total")
+    assert_eq_str(tv, "3", "persisted total matches")
+    // a second flush ACCUMULATES onto the persisted total (never overwrites)
+    g_rl_hits[tid] = 2
+    tn_rl_flush()
+    rec, found = gr_get("rl-" + tid)
+    tv, terr = json_get(rec, ".throttled_total")
+    assert_eq_str(tv, "5", "totals accumulate across flushes")
+}
+
+func ut_helpers() {
+    assert_eq_str(unq_tok("\"pw_x\""), "pw_x", "unq_tok strips quotes")
+    assert_eq_str(unq_tok("42"), "42", "unq_tok leaves raw tokens")
+    assert_eq_str(unq_tok(""), "", "unq_tok handles empty")
+    g_srv_db = "/data/grange"
+    assert_eq_str(tn_root("tabc"), "/data/grange.tenants/tabc", "tenant root is a sibling dir (hidden from /collections)")
+    assert(tn_free_bytes() > 0, "a free tier is always configured")
+    assert(tn_price() > 0, "a price is always configured")
+}
+
+func main() {
+    ut_accrual()
+    ut_rate_limiter()
+    ut_rl_persistence()
+    ut_helpers()
+    test_summary()
+}

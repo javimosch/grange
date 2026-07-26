@@ -85,6 +85,59 @@ func gr_load_recfile(path) (lines, nrecs, ok) {
     ok = 1
 }
 
+// gr_load_recbody reads + verifies a record file and returns its BODY as
+// BYTES. Callers walk it with gr_next_line instead of materialising a per-line
+// slice: in a long-lived actor every such slice stays in the arena (~70 kB per
+// page read), which is fatal for disk-resident collections that read thousands
+// of pages per scan or index build. Bytes (not string) because only
+// bytes_index takes a start offset — searching a string would mean copying the
+// remainder on every line, which is quadratic.
+var g_nl = bytes("\n")
+
+func gr_load_recbody(path) (body, ok) {
+    body = bytes("")
+    ok = 0
+    // read as bytes: no string->bytes copy, and sha256_bytes verifies in place
+    raw := read_file_bytes(path)
+    n := len(raw)
+    if n == 0 { return }
+    cut := n
+    if byte_at(raw, cut - 1) == 10 { cut = cut - 1 }
+    tstart := cut - 1
+    while tstart >= 0 {
+        if byte_at(raw, tstart) == 10 { break }
+        tstart = tstart - 1
+    }
+    trailer := bytes_str(bytes_sub(raw, tstart + 1, cut))
+    if has_prefix(trailer, "#|") == false { return }
+    parts := split(trailer, "|")
+    if len(parts) != 3 { return }
+    cand := bytes("")
+    if tstart > 0 { cand = bytes_sub(raw, 0, tstart) }
+    if substr(to_hex(sha256_bytes(cand)), 0, 12) != parts[2] { return }
+    body = cand
+    ok = 1
+}
+
+// gr_next_line walks a body: (line, next position, more).
+func gr_next_line(body, pos) (line, next, more) {
+    line = ""
+    next = pos
+    more = 0
+    n := len(body)
+    if pos >= n { return }
+    nl := bytes_index(body, g_nl, pos)
+    if nl < 0 {
+        line = bytes_str(bytes_sub(body, pos, n))
+        next = n
+        more = 1
+        return
+    }
+    line = bytes_str(bytes_sub(body, pos, nl))
+    next = nl + 1
+    more = 1
+}
+
 // gr_apply_lines replays record lines into the memtable. Returns records applied,
 // or -1 on a structurally corrupt stream (should not happen once checksum passed).
 func gr_apply_lines(lines) (recs) {
@@ -170,6 +223,9 @@ func gr_open(db, coll) (ok, errmsg) {
     g_run_rid = []int{}
     g_run_pages = []int{}
     g_run_count = []int{}
+    g_run_fields = []string{}
+    g_run_iparts = []int{}
+    g_cifields = []string{}
     mkdir(db)
     mkdir(gr_dir())
     entries := list_dir(gr_dir())
@@ -199,6 +255,7 @@ func gr_open(db, coll) (ok, errmsg) {
             i = i + 1
         }
         g_gen = maxgen
+        cold_idx_load()
         cold_load_runs()
         pre := "wal-" + gr_pad6(g_gen) + "-"
         chunks := []int{}

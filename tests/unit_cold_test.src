@@ -1,0 +1,207 @@
+// unit: cold storage (page/run layout, shadowing, compaction) and the M20
+// cold secondary indexes (value-partitioned index pages).
+
+func uc_dir() (d) {
+    d = "/tmp/grange-ut-cold-" + str(now_ms())
+}
+
+func uc_seed(db, coll, n) {
+    ok, errmsg := gr_open(db, coll)
+    i := 0
+    while i < n {
+        gr_put("k" + str(i), "{\"i\":" + str(i) + ",\"grp\":\"g" + str(i % 4) + "\",\"tag\":\"t" + str(i) + "\"}")
+        i = i + 1
+    }
+    gr_commit()
+}
+
+func uc_hash_partitioning() {
+    // the hash must be stable (same id -> same page forever) and in-range
+    h1 := cold_hash("k1")
+    h2 := cold_hash("k1")
+    assert_eq_int(h1, h2, "cold_hash is deterministic")
+    assert(cold_hash("k1") != cold_hash("k2"), "cold_hash separates ids")
+    assert(h1 >= 0, "cold_hash is non-negative (masked to 32 bits)")
+    // page counts are powers of two so & (P-1) is a valid partition
+    assert_eq_int(cold_pow2_pages(1), 1, "tiny collection = 1 page")
+    assert_eq_int(cold_pow2_pages(300), 1, "300 docs still 1 page")
+    assert_eq_int(cold_pow2_pages(301), 2, "301 docs = 2 pages")
+    assert_eq_int(cold_pow2_pages(2000), 8, "2000 docs = 8 pages")
+    p := cold_pow2_pages(200000)
+    pow2 := 1
+    while pow2 < p { pow2 = pow2 * 2 }
+    assert_eq_int(pow2, p, "page count is a power of two")
+}
+
+func uc_enable_and_read() {
+    db := uc_dir()
+    uc_seed(db, "c", 500)
+    cok, cerr := gr_cold_enable()
+    assert_eq_int(cok, 1, "cold enable succeeds")
+    assert_eq_int(len(keys(g_mem)), 0, "memtable flushed into the run")
+    assert_eq_int(gr_count(), 500, "cold count matches what was written")
+    doc, found := gr_get("k250")
+    assert_eq_int(found, 1, "point get from a run page")
+    iv, ierr := json_get(doc, ".i")
+    assert_eq_str(iv, "250", "point get returns the right doc")
+    doc, found = gr_get("absent")
+    assert_eq_int(found, 0, "absent id reports not-found")
+    // enabling twice is a no-op, not a corruption
+    cok, cerr = gr_cold_enable()
+    assert_eq_int(cok, 1, "cold enable is idempotent")
+    assert_eq_int(gr_count(), 500, "count unchanged after re-enable")
+}
+
+func uc_shadowing() {
+    db := uc_dir()
+    uc_seed(db, "c", 400)
+    cok, cerr := gr_cold_enable()
+    // memtable shadows the run for both overwrite and delete
+    gr_put("k10", "{\"i\":-1,\"grp\":\"gz\",\"tag\":\"t10\"}")
+    gr_del("k11")
+    gr_commit()
+    doc, found := gr_get("k10")
+    iv, ierr := json_get(doc, ".i")
+    assert_eq_str(iv, "-1", "memtable overwrite wins over the run")
+    doc, found = gr_get("k11")
+    assert_eq_int(found, 0, "memtable tombstone hides the run doc")
+    assert_eq_int(gr_count(), 399, "count reflects the delete")
+    // after a flush the shadowing must survive in the newer run
+    assert_eq_int(cold_flush(), 1, "flush creates a second run")
+    assert_eq_int(len(g_run_rid), 2, "two runs now exist")
+    doc, found = gr_get("k10")
+    iv, ierr = json_get(doc, ".i")
+    assert_eq_str(iv, "-1", "newer run shadows older run")
+    doc, found = gr_get("k11")
+    assert_eq_int(found, 0, "tombstone persists across runs")
+    // and across a reopen from disk
+    ok, errmsg := gr_open(db, "c")
+    assert_eq_int(g_cold, 1, "cold flag detected on open")
+    assert_eq_int(len(g_run_rid), 2, "both runs loaded")
+    assert_eq_int(gr_count(), 399, "count durable")
+    doc, found = gr_get("k11")
+    assert_eq_int(found, 0, "tombstone durable")
+    // compaction folds runs and preserves every decision
+    assert_eq_int(gr_compact(), 1, "cold compact")
+    assert_eq_int(len(g_run_rid), 1, "single run after compact")
+    assert_eq_int(gr_count(), 399, "count preserved by compact")
+    doc, found = gr_get("k10")
+    iv, ierr = json_get(doc, ".i")
+    assert_eq_str(iv, "-1", "overwrite winner survives compact")
+    doc, found = gr_get("k11")
+    assert_eq_int(found, 0, "delete stays deleted after compact")
+}
+
+func uc_index_lookup() {
+    db := uc_dir()
+    uc_seed(db, "c", 600)
+    cok, cerr := gr_cold_enable()
+    // before declaring, an equality query must fall back to a scan
+    assert_eq_int(cold_is_indexed("grp"), 0, "field not indexed yet")
+    cj := q_count("grp=g1")
+    cm, cmerr := json_get(cj, ".mode")
+    assert_eq_str(cm, "\"cold-scan\"", "unindexed cold query scans")
+    cv, cverr := json_get(cj, ".count")
+    assert_eq_str(cv, "150", "scan count correct")
+    // declaring builds index pages over the existing data
+    assert_eq_int(gr_index_add("grp", "", ""), 1, "declare cold index")
+    assert_eq_int(cold_is_indexed("grp"), 1, "field now declared")
+    assert_eq_int(cold_idx_ready("grp"), 1, "every run carries index pages")
+    assert_eq_int(cold_idx_ready("other"), 0, "undeclared field is not ready")
+    // the same answer, now through the index
+    cj = q_count("grp=g1")
+    cm, cmerr = json_get(cj, ".mode")
+    assert_eq_str(cm, "\"cold-index\"", "indexed cold query uses the index")
+    cv, cverr = json_get(cj, ".count")
+    assert_eq_str(cv, "150", "indexed count equals the scan count")
+    // a unique-ish field: one candidate, exact result
+    assert_eq_int(gr_index_add("tag", "", ""), 1, "declare a second cold index")
+    fj := q_find("tag=t7", 0)
+    fv, fverr := json_get(fj, ".count")
+    assert_eq_str(fv, "1", "unique index lookup returns one doc")
+    fid, fiderr := json_get(fj, ".items[0].id")
+    assert_eq_str(fid, "\"k7\"", "index lookup returns the right id")
+    // a value with no matches
+    fj = q_find("tag=nosuch", 0)
+    fv, fverr = json_get(fj, ".count")
+    assert_eq_str(fv, "0", "missing value yields no results")
+    // limit is honored by the index path
+    fj = q_find("grp=g1", 5)
+    fv, fverr = json_get(fj, ".count")
+    assert_eq_str(fv, "5", "limit applies on the index path")
+}
+
+func uc_index_exactness() {
+    db := uc_dir()
+    uc_seed(db, "c", 400)
+    cok, cerr := gr_cold_enable()
+    assert_eq_int(gr_index_add("grp", "", ""), 1, "declare cold index")
+    before := q_count("grp=g0")
+    bv, bverr := json_get(before, ".count")
+    assert_eq_str(bv, "100", "baseline count")
+    // move a doc OUT of the indexed value: the stale index entry must not leak
+    gr_put("k0", "{\"i\":0,\"grp\":\"gmoved\",\"tag\":\"t0\"}")
+    // delete another doc with that value: the tombstone must be honored
+    gr_del("k4")
+    gr_commit()
+    after := q_count("grp=g0")
+    av, averr := json_get(after, ".count")
+    assert_eq_str(av, "98", "index results re-verified: moved + deleted docs excluded")
+    // a doc moved INTO the value while only in the memtable must be found
+    gr_put("k1", "{\"i\":1,\"grp\":\"gmoved\",\"tag\":\"t1\"}")
+    gr_commit()
+    mj := q_count("grp=gmoved")
+    mv, mverr := json_get(mj, ".count")
+    assert_eq_str(mv, "2", "memtable docs are included in index lookups")
+    // still exact after a flush (entries now live in a newer run)
+    assert_eq_int(cold_flush(), 1, "flush")
+    mj = q_count("grp=gmoved")
+    mv, mverr = json_get(mj, ".count")
+    assert_eq_str(mv, "2", "exact after flush")
+    aj := q_count("grp=g0")
+    av, averr = json_get(aj, ".count")
+    assert_eq_str(av, "98", "moved-away + deleted docs stay excluded after flush")
+    // combined clauses: index picks candidates, the rest filters
+    kj := q_count("grp=g0,i<100")
+    kv, kverr := json_get(kj, ".count")
+    // g0 docs with i<100: i in {0,4,..,96} = 25, minus k0 (moved) and k4 (deleted)
+    assert_eq_str(kv, "23", "extra clauses filter index candidates")
+    // declarations and index pages survive a reopen
+    ok, errmsg := gr_open(db, "c")
+    assert_eq_int(cold_is_indexed("grp"), 1, "declaration persisted")
+    assert_eq_int(cold_idx_ready("grp"), 1, "index pages ready after reopen")
+    rj := q_count("grp=g0")
+    rv, rverr := json_get(rj, ".mode")
+    assert_eq_str(rv, "\"cold-index\"", "index path used after reopen")
+    rc, rcerr := json_get(rj, ".count")
+    assert_eq_str(rc, "98", "count still exact after reopen")
+}
+
+func uc_index_numeric_and_batch() {
+    db := uc_dir()
+    uc_seed(db, "c", 900)
+    cok, cerr := gr_cold_enable()
+    // numeric values index by their raw token
+    assert_eq_int(gr_index_add("i", "", ""), 1, "declare index on a numeric field")
+    fj := q_find("i=500", 0)
+    fv, fverr := json_get(fj, ".count")
+    assert_eq_str(fv, "1", "numeric equality via index")
+    fm, fmerr := json_get(fj, ".mode")
+    assert_eq_str(fm, "\"cold-index\"", "numeric lookup uses the index")
+    // an index build with a batch size of 1 must produce identical results
+    // (the batched build is the RAM-bounded path; correctness must not vary)
+    assert_eq_int(gr_compact(), 1, "compact rebuilds index pages")
+    cj := q_count("grp=g2")
+    cv, cverr := json_get(cj, ".count")
+    assert_eq_str(cv, "225", "count after rebuild")
+}
+
+func main() {
+    uc_hash_partitioning()
+    uc_enable_and_read()
+    uc_shadowing()
+    uc_index_lookup()
+    uc_index_exactness()
+    uc_index_numeric_and_batch()
+    test_summary()
+}

@@ -181,7 +181,7 @@ func cmd_compact(fs) {
 func cmd_stats(fs) {
     do_open(fs)
     if g_cold == 1 {
-        emit_ok("{\"cold\":true,\"docs_estimate\":" + str(cold_count_est()) + ",\"runs\":" + str(len(g_run_rid)) + ",\"gen\":" + str(g_gen) + ",\"chunks_replayed\":" + str(g_replayed_chunks) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}")
+        emit_ok("{\"cold\":true,\"docs_estimate\":" + str(cold_count_est()) + ",\"cold_indexes\":" + str(len(g_cifields)) + ",\"runs\":" + str(len(g_run_rid)) + ",\"gen\":" + str(g_gen) + ",\"chunks_replayed\":" + str(g_replayed_chunks) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}")
         return
     }
     emit_ok("{\"docs\":" + str(gr_count()) + ",\"gen\":" + str(g_gen) + ",\"chunks_replayed\":" + str(g_replayed_chunks) + ",\"chunks_skipped\":" + str(g_skipped_chunks) + ",\"next_chunk\":" + str(g_next_chunk) + ",\"indexes\":" + str(len(g_ifields)) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}")

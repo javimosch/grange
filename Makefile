@@ -1,5 +1,5 @@
 BIN = grange
-SRCS = framework/flags.src framework/machweb.src src/engine.src src/registry.src src/cold.src src/index.src src/range.src src/query.src src/bench.src src/tenant.src src/landing.src src/serve.src src/cli.src
+SRCS = framework/flags.src framework/machweb.src src/engine.src src/registry.src src/cold.src src/coldindex.src src/index.src src/range.src src/query.src src/watch.src src/bench.src src/tenant.src src/landing.src src/serve.src src/cli.src
 
 build:
 	machin encode $(SRCS) > $(BIN).mfl
@@ -9,7 +9,11 @@ check:
 	machin check $(SRCS)
 
 test:
-	machin test framework/machweb.src src/engine.src src/registry.src src/cold.src src/index.src src/range.src src/query.src src/tenant.src src/serve.src tests/engine_test.src
+	@machin test framework/machweb.src src/engine.src src/registry.src src/cold.src src/coldindex.src src/index.src src/range.src src/query.src src/watch.src src/tenant.src src/serve.src tests/engine_test.src | tail -1
+	@machin test framework/machweb.src src/engine.src src/registry.src src/cold.src src/coldindex.src src/index.src src/range.src src/query.src src/watch.src src/tenant.src src/serve.src tests/unit_query_test.src | tail -1
+	@machin test framework/machweb.src src/engine.src src/registry.src src/cold.src src/coldindex.src src/index.src src/range.src src/query.src src/watch.src src/tenant.src src/serve.src tests/unit_index_test.src | tail -1
+	@machin test framework/machweb.src src/engine.src src/registry.src src/cold.src src/coldindex.src src/index.src src/range.src src/query.src src/watch.src src/tenant.src src/serve.src tests/unit_cold_test.src | tail -1
+	@machin test framework/machweb.src src/engine.src src/registry.src src/cold.src src/coldindex.src src/index.src src/range.src src/query.src src/watch.src src/tenant.src src/serve.src tests/unit_tenant_test.src | tail -1
 
 bench: build
 	rm -rf /tmp/grange-bench

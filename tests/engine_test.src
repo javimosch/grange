@@ -294,8 +294,10 @@ func main() {
     assert_eq_int(found, 0, "delete stays deleted after compact")
     ok, errmsg = gr_open(db, "cold")
     assert_eq_int(gr_count(), 499, "compacted state durable")
+    // M20: a cold collection now takes value-partitioned index pages instead
     iok := gr_index_add("grp", "", "")
-    assert_eq_int(iok, 0, "indexes rejected on cold")
+    assert_eq_int(iok, 1, "cold index declared (M18 rejected this; M20 supports it)")
+    assert_eq_int(cold_idx_ready("grp"), 1, "cold index usable right after declaring")
 
     // ix_fstr precision (the %g bug): big integral sums print exactly
     assert_eq_str(ix_fstr(16649667.0), "16649667", "fstr big int exact")

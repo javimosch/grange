@@ -50,6 +50,8 @@ func cold_load_runs() {
     g_run_rid = []int{}
     g_run_pages = []int{}
     g_run_count = []int{}
+    g_run_fields = []string{}
+    g_run_iparts = []int{}
     entries := list_dir(gr_dir())
     pre := "crun-" + gr_pad6(g_gen) + "-"
     rids := []int{}
@@ -68,10 +70,14 @@ func cold_load_runs() {
         if ok == 1 && len(lines) == 2 {
             pv, perr := json_get(lines[1], ".pages")
             cv, cverr := json_get(lines[1], ".count")
+            fv, fverr := json_get(lines[1], ".fields")
             if len(perr) == 0 {
                 g_run_rid = append(g_run_rid, rids[i])
                 g_run_pages = append(g_run_pages, parse_int(pv))
                 g_run_count = append(g_run_count, parse_int(cv))
+                g_run_fields = append(g_run_fields, wh_unquote(fv))
+                iv, iverr := json_get(lines[1], ".iparts")
+                if len(iverr) == 0 { g_run_iparts = append(g_run_iparts, parse_int(iv)) } else { g_run_iparts = append(g_run_iparts, cold_idx_parts()) }
             }
         }
         i = i + 1
@@ -93,35 +99,47 @@ func cold_flush() (ok) {
     // partition into pages
     k := 0
     while k < pcount {
-        lines := []string{}
-        nrec := 0
-        i := 0
-        while i < len(ids) {
-            if (cold_hash(ids[i]) & (pcount - 1)) == k {
-                lines = append(lines, "p|" + ids[i])
-                lines = append(lines, g_mem[ids[i]])
-                nrec = nrec + 1
+        // arena: the page's lines never outlive the write, so they are
+        // reclaimed instead of accumulating in the long-lived actor
+        arena {
+            lines := []string{}
+            nrec := 0
+            i := 0
+            while i < len(ids) {
+                if (cold_hash(ids[i]) & (pcount - 1)) == k {
+                    lines = append(lines, "p|" + ids[i])
+                    lines = append(lines, g_mem[ids[i]])
+                    nrec = nrec + 1
+                }
+                i = i + 1
             }
-            i = i + 1
-        }
-        i = 0
-        while i < len(tombs) {
-            if (cold_hash(tombs[i]) & (pcount - 1)) == k {
-                lines = append(lines, "d|" + tombs[i])
-                nrec = nrec + 1
+            i = 0
+            while i < len(tombs) {
+                if (cold_hash(tombs[i]) & (pcount - 1)) == k {
+                    lines = append(lines, "d|" + tombs[i])
+                    nrec = nrec + 1
+                }
+                i = i + 1
             }
-            i = i + 1
+            if gr_write_recfile(gr_dir() + "/" + cold_page_name(rid, k), lines, nrec) == 0 { ok = 0 }
         }
-        if gr_write_recfile(gr_dir() + "/" + cold_page_name(rid, k), lines, nrec) == 0 { ok = 0  return }
+        if ok == 0 { return }
         k = k + 1
     }
     meta := []string{}
     meta = append(meta, "p|meta")
-    meta = append(meta, "{\"pages\":" + str(pcount) + ",\"count\":" + str(total) + "}")
+    meta = append(meta, "{\"pages\":" + str(pcount) + ",\"count\":" + str(total) + ",\"fields\":\"" + join(g_cifields, ",") + "\",\"iparts\":" + str(cold_idx_parts()) + "}")
     if gr_write_recfile(gr_dir() + "/" + cold_meta_name(rid), meta, 1) == 0 { ok = 0  return }
+    fi := 0
+    while fi < len(g_cifields) {
+        if cold_write_idx_pages(rid, g_cifields[fi], g_mem) == 0 { ok = 0  return }
+        fi = fi + 1
+    }
     g_run_rid = append(g_run_rid, rid)
     g_run_pages = append(g_run_pages, pcount)
     g_run_count = append(g_run_count, total)
+    g_run_fields = append(g_run_fields, join(g_cifields, ","))
+    g_run_iparts = append(g_run_iparts, cold_idx_parts())
     // memtable is now redundant with the run: clear it and its WAL chunks
     g_mem = make(map[string]string)
     g_tomb = make(map[string]int)
@@ -139,22 +157,24 @@ func cold_flush() (ok) {
 
 // cold_page_lookup scans one loaded page's lines for id.
 // verdict: 0 absent · 1 put (doc set) · 2 tombstone
-func cold_page_lookup(lines, id) (verdict, doc) {
+func cold_page_lookup(body, id) (verdict, doc) {
     verdict = 0
     doc = ""
-    i := 0
-    n := len(lines)
-    while i < n {
-        ln := lines[i]
+    pos := 0
+    while true {
+        ln, next, more := gr_next_line(body, pos)
+        if more == 0 { return }
+        pos = next
         if has_prefix(ln, "p|") {
+            dline, dnext, dmore := gr_next_line(body, pos)
+            if dmore == 0 { return }
+            pos = dnext
             if substr(ln, 2, len(ln)) == id {
                 verdict = 1
-                doc = lines[i+1]
+                doc = dline
             }
-            i = i + 2
         } else {
             if substr(ln, 2, len(ln)) == id { verdict = 2 }
-            i = i + 1
         }
     }
 }
@@ -173,9 +193,9 @@ func cold_get(id) (doc, found) {
     r := len(g_run_rid) - 1
     while r >= 0 {
         k := h & (g_run_pages[r] - 1)
-        lines, nrecs, ok := gr_load_recfile(gr_dir() + "/" + cold_page_name(g_run_rid[r], k))
+        body, ok := gr_load_recbody(gr_dir() + "/" + cold_page_name(g_run_rid[r], k))
         if ok == 1 {
-            verdict, d := cold_page_lookup(lines, id)
+            verdict, d := cold_page_lookup(body, id)
             if verdict == 1 {
                 doc = d
                 found = 1
@@ -194,20 +214,22 @@ func cold_group(k, maxp) (grp) {
     r := 0
     while r < len(g_run_rid) {
         pk := k & (g_run_pages[r] - 1)
-        lines, nrecs, ok := gr_load_recfile(gr_dir() + "/" + cold_page_name(g_run_rid[r], pk))
+        body, ok := gr_load_recbody(gr_dir() + "/" + cold_page_name(g_run_rid[r], pk))
         if ok == 1 {
-            i := 0
-            n := len(lines)
-            while i < n {
-                ln := lines[i]
+            pos := 0
+            while true {
+                ln, next, more := gr_next_line(body, pos)
+                if more == 0 { break }
+                pos = next
                 if has_prefix(ln, "p|") {
+                    dline, dnext, dmore := gr_next_line(body, pos)
+                    if dmore == 0 { break }
+                    pos = dnext
                     id := substr(ln, 2, len(ln))
-                    if (cold_hash(id) & (maxp - 1)) == k { grp[id] = lines[i+1] }
-                    i = i + 2
+                    if (cold_hash(id) & (maxp - 1)) == k { grp[id] = dline }
                 } else {
                     id := substr(ln, 2, len(ln))
                     if (cold_hash(id) & (maxp - 1)) == k { delete(grp, id) }
-                    i = i + 1
                 }
             }
         }
@@ -242,7 +264,7 @@ func cold_count_all() (n) {
     maxp := cold_maxp()
     k := 0
     while k < maxp {
-        n = n + len(keys(cold_group(k, maxp)))
+        arena { n = n + len(keys(cold_group(k, maxp))) }
         k = k + 1
     }
 }
@@ -287,7 +309,7 @@ func cold_compact() (ok) {
     }
     meta := []string{}
     meta = append(meta, "p|meta")
-    meta = append(meta, "{\"pages\":" + str(newp) + ",\"count\":" + str(written) + "}")
+    meta = append(meta, "{\"pages\":" + str(newp) + ",\"count\":" + str(written) + ",\"fields\":\"" + join(g_cifields, ",") + "\",\"iparts\":" + str(cold_idx_parts()) + "}")
     if gr_write_recfile(gr_dir() + "/" + cold_meta_name(1), meta, 1) == 0 { g_gen = oldgen  return }
     // new gen valid: drop every older artifact
     entries := list_dir(gr_dir())
@@ -306,6 +328,9 @@ func cold_compact() (ok) {
     g_run_rid = []int{1}
     g_run_pages = []int{newp}
     g_run_count = []int{written}
+    g_run_fields = []string{join(g_cifields, ",")}
+    g_run_iparts = []int{cold_idx_parts()}
+    if cold_build_indexes(1, newp) == 0 { return }
     ok = 1
 }
 
@@ -319,6 +344,7 @@ func gr_cold_enable() (ok, errmsg) {
     if gr_commit() == 0 { errmsg = "commit failed"  return }
     if write_file(gr_dir() + "/cold.flag", "1\n") < 0 { errmsg = "cannot write cold.flag"  return }
     g_cold = 1
+    cold_idx_load()
     cold_load_runs()
     if cold_flush() == 0 { errmsg = "initial flush failed"  return }
     ok = 1

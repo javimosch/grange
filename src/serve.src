@@ -26,7 +26,7 @@ var g_rss_last = 0
 
 func srv_rss_watchdog() {
     nowms := now_ms()
-    if nowms - g_rss_last < 60000 { return }
+    if nowms - g_rss_last < 10000 { return }
     g_rss_last = nowms
     maxmb := parse_int(env("GRANGE_MAX_RSS_MB"))
     if maxmb == 0 { maxmb = 300 }
@@ -99,82 +99,6 @@ func srv_use(req, root) (ok) {
     if c == "_sys" { return }
     uok, uerr := gr_use(root, c)
     ok = uok
-}
-
-// watch_payload renders changes after `since` for the CURRENT collection.
-func watch_payload(since) (data) {
-    items := []string{}
-    resync := 0
-    if since > g_seq { resync = 1 }
-    floor := g_seq - len(g_chg)
-    if floor < g_seq_base { floor = g_seq_base }
-    if since < floor { resync = 1 }
-    if resync == 0 {
-        i := 0
-        while i < len(g_chg) {
-            sv, serr := json_get(g_chg[i], ".seq")
-            if len(serr) == 0 && parse_int(sv) > since { items = append(items, g_chg[i]) }
-            i = i + 1
-        }
-    }
-    data = "{\"seq\":" + str(g_seq) + ",\"resync\":" + str(resync) + ",\"changes\":[" + join(items, ",") + "]}"
-}
-
-// srv_write_res writes a Response to fd and closes it (our own loop's writer).
-func srv_write_res(fd, res) {
-    out := "HTTP/1.1 " + res.status + "\r\nContent-Type: " + res.ctype + "\r\nContent-Length: " + str(len(res.body)) + "\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n" + res.body
-    write(fd, out)
-    close(fd)
-}
-
-// watch_park stashes the current connection until news or deadline.
-var g_park_tid = ""
-
-func watch_park(fd, since, timeout_s) {
-    g_w_fd = append(g_w_fd, fd)
-    g_w_tid = append(g_w_tid, g_park_tid)
-    g_w_db = append(g_w_db, g_db)
-    g_w_coll = append(g_w_coll, g_coll)
-    g_w_since = append(g_w_since, since)
-    g_w_deadline = append(g_w_deadline, now_ms() + timeout_s * 1000)
-}
-
-// watch_tick wakes parked watchers whose collection advanced or deadline hit.
-func watch_tick() {
-    if len(g_w_fd) == 0 { return }
-    nowms := now_ms()
-    kfd := []int{}
-    ktid := []string{}
-    kdb := []string{}
-    kcoll := []string{}
-    ksince := []int{}
-    kdl := []int{}
-    i := 0
-    while i < len(g_w_fd) {
-        uok, uerr := gr_use(g_w_db[i], g_w_coll[i])
-        if g_srv_follow == 1 && uok == 1 { gr_refresh() }
-        fire := 0
-        if uok == 0 { fire = 1 }
-        if g_seq > g_w_since[i] { fire = 1 }
-        if nowms >= g_w_deadline[i] { fire = 1 }
-        if fire == 1 {
-            srv_write_res(g_w_fd[i], srv_ok(watch_payload(g_w_since[i])))
-        } else {
-            kfd = append(kfd, g_w_fd[i])
-            ktid = append(ktid, g_w_tid[i])
-            kdb = append(kdb, g_w_db[i])
-            kcoll = append(kcoll, g_w_coll[i])
-            ksince = append(ksince, g_w_since[i])
-            kdl = append(kdl, g_w_deadline[i])
-        }
-        i = i + 1
-    }
-    g_w_fd = kfd
-    g_w_tid = ktid
-    g_w_db = kdb
-    g_w_coll = kcoll
-    g_w_since = ksince
-    g_w_deadline = kdl
 }
 
 func srv_handle(req) (res) {
@@ -350,8 +274,16 @@ func srv_handle(req) (res) {
     //   -\t<id>          delete
     if req.method == "POST" && (req.path == "/bulk" || has_prefix(req.path, "/bulk?")) {
         lines := split(req.body, "\n")
-        if len(lines) > 50000 {
-            res = srv_err("400 Bad Request", "input", "max 50000 ops per bulk request")
+        // count real ops: an NDJSON body normally ends with a newline, and a
+        // trailing empty line must not push a full batch over the cap
+        nlines := 0
+        li := 0
+        while li < len(lines) {
+            if len(trim(lines[li])) > 0 { nlines = nlines + 1 }
+            li = li + 1
+        }
+        if nlines > 50000 {
+            res = srv_err("400 Bad Request", "input", "max 50000 ops per bulk request (got " + str(nlines) + ")")
             return
         }
         // pass 1: validate everything — nothing stages until the batch is clean,
@@ -497,7 +429,7 @@ func srv_handle(req) (res) {
     }
     if req.method == "GET" && has_prefix(req.path, "/stats") {
         if g_cold == 1 {
-            res = srv_ok("{\"coll\":\"" + jesc(g_coll) + "\",\"cold\":true,\"docs_estimate\":" + str(cold_count_est()) + ",\"runs\":" + str(len(g_run_rid)) + ",\"gen\":" + str(g_gen) + "}")
+            res = srv_ok("{\"coll\":\"" + jesc(g_coll) + "\",\"cold\":true,\"docs_estimate\":" + str(cold_count_est()) + ",\"runs\":" + str(len(g_run_rid)) + ",\"gen\":" + str(g_gen) + ",\"cold_indexes\":" + str(len(g_cifields)) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}")
             return
         }
         res = srv_ok("{\"coll\":\"" + jesc(g_coll) + "\",\"docs\":" + str(gr_count()) + ",\"gen\":" + str(g_gen) + ",\"chunks_replayed\":" + str(g_replayed_chunks) + ",\"indexes\":" + str(len(g_ifields)) + "}")
