@@ -82,7 +82,8 @@ class Grange {
     return this._req('GET', `/agg?${this._qs}&group-by=${encodeURIComponent(groupBy)}&sum=${encodeURIComponent(sum)}&minmax=${encodeURIComponent(minmax)}`);
   }
 
-  // kind: '' (equality buckets + sum registers) or 'range' (sorted projection)
+  // kind: '' (equality) or 'range' (ordered; on cold collections this writes
+  // sorted index pages so time-range style queries read only overlapping pages)
   async index(field, { sums = '', kind = '' } = {}) {
     return this._req('POST', '/index', { db: this._db, coll: this._coll, field, sums, kind });
   }
@@ -114,6 +115,27 @@ class Grange {
   // -> { seq, resync, changes: [{seq, op, id}] }
   async watch(since = 0, { timeout = 25 } = {}) {
     return this._req('GET', `/watch?${this._qs}&since=${since}&timeout=${timeout}`);
+  }
+
+  // Convert this collection to disk-resident (cold) storage. Irreversible.
+  async cold() { return this._req('POST', '/cold', { db: this._db, coll: this._coll }); }
+
+  // Fold WAL chunks (or cold runs) into a fresh generation.
+  async compact() { return this._req('POST', '/compact', { db: this._db, coll: this._coll }); }
+
+  // Integrity check: checksums, manifests vs pages, declared indexes.
+  // Throws GrangeError('corruption') when the collection is damaged.
+  async verify() { return this._req('GET', `/verify?${this._qs}`); }
+
+  // Full dump. format 'lines' returns NDJSON "<id>\t<doc>" text (pipe it into
+  // another grange's bulk); default returns { count, items }.
+  async export(where = '', { format = '' } = {}) {
+    if (format === 'lines') {
+      const res = await fetch(`${this.url}/export?${this._qs}&format=lines`,
+        { headers: { authorization: `Bearer ${this.token}` } });
+      return res.text();
+    }
+    return this._req('GET', `/export?${this._qs}&where=${encodeURIComponent(where)}`);
   }
 
   async collections() { return (await this._req('GET', `/collections?db=${encodeURIComponent(this._db)}`)).collections; }

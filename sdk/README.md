@@ -12,7 +12,10 @@ scoped by database + collection (`db("crm").coll("leads")` style).
 | **Go** | `go get github.com/javimosch/grange/sdk/go` | `grange.New(url, token)` |
 | **machin (MFL)** | compose `sdk/machin/grange_client.src` | `grange_client(url, token)` |
 
-Each file's header comment is the usage example; the wire contract is
+Every client covers the whole HTTP API: `put/get/del/find/count/agg/index`,
+bulk (`putMany`/`delMany`), `watch`, `cold`, `compact`, `verify`, `export`
+(JSON or NDJSON lines), `collections`/`dbs`/`stats`/`usage`. Each file's header
+comment is the usage example; the wire contract is
 `/llms.txt` on any grange server. Signup for the hosted instance is self-serve
 with a [peage](https://peage.intrane.fr) wallet (`signup()` in the Node SDK, or
 one curl — see /llms.txt).

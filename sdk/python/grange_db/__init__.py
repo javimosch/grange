@@ -19,7 +19,7 @@ import urllib.parse as _up
 import urllib.error as _er
 
 __all__ = ["Grange", "GrangeError", "signup"]
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 
 class GrangeError(Exception):
@@ -131,6 +131,29 @@ class Grange:
             self.timeout = old
 
     def export(self, where=""):
+        return self._req("GET", f"/export?{self._qs}&where={_up.quote(where)}")
+
+    def cold(self):
+        """Convert this collection to disk-resident (cold) storage. Irreversible."""
+        return self._req("POST", "/cold", {"db": self._db, "coll": self._coll})
+
+    def compact(self):
+        """Fold WAL chunks (or cold runs) into a fresh generation."""
+        return self._req("POST", "/compact", {"db": self._db, "coll": self._coll})
+
+    def verify(self):
+        """Integrity check: checksums, manifests vs pages, declared indexes.
+        Raises GrangeError('corruption') when the collection is damaged."""
+        return self._req("GET", f"/verify?{self._qs}")
+
+    def export(self, where="", format=""):
+        """Full dump. format='lines' returns NDJSON '<id>\t<doc>' text (pipe it
+        into another grange's bulk); default returns {count, items}."""
+        if format == "lines":
+            req = _rq.Request(f"{self.url}/export?{self._qs}&format=lines",
+                              headers={"authorization": "Bearer " + self.token})
+            with _rq.urlopen(req, timeout=self.timeout) as resp:
+                return resp.read().decode()
         return self._req("GET", f"/export?{self._qs}&where={_up.quote(where)}")
 
     def collections(self):

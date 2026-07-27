@@ -124,3 +124,37 @@ func grange_watch(g, since, timeout_s) (data) {
     status, resp := grange_req(g, "GET", "/watch?" + grange_qs(g) + "&since=" + str(since) + "&timeout=" + str(timeout_s), "")
     data = grange_data(status, resp)
 }
+
+// grange_cold converts the current collection to disk-resident storage.
+func grange_cold(g) (ok) {
+    ok = 0
+    status, resp := grange_req(g, "POST", "/cold", "{\"db\":\"" + g.db + "\",\"coll\":\"" + g.coll + "\"}")
+    if status == 200 { ok = 1 }
+}
+
+// grange_compact folds WAL chunks (or cold runs) into a fresh generation.
+func grange_compact(g) (ok) {
+    ok = 0
+    status, resp := grange_req(g, "POST", "/compact", "{\"db\":\"" + g.db + "\",\"coll\":\"" + g.coll + "\"}")
+    if status == 200 { ok = 1 }
+}
+
+// grange_verify returns the integrity report ("" if the request failed).
+func grange_verify(g) (data) {
+    status, resp := grange_req(g, "GET", "/verify?" + grange_qs(g), "")
+    data = grange_data(status, resp)
+}
+
+// grange_export returns the full collection as data JSON ({count, items}).
+func grange_export(g, where) (data) {
+    status, resp := grange_req(g, "GET", "/export?" + grange_qs(g) + "&where=" + url_encode(where), "")
+    data = grange_data(status, resp)
+}
+
+// grange_export_lines returns NDJSON "<id>\t<doc>" text, ready to pipe into
+// grange_bulk on another instance.
+func grange_export_lines(g) (text) {
+    text = ""
+    status, resp, herr := http_request("GET", g.base + "/export?" + grange_qs(g) + "&format=lines", []string{"authorization: Bearer " + g.token}, "")
+    if len(herr) == 0 && status == 200 { text = resp }
+}

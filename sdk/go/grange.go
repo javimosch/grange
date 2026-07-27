@@ -244,6 +244,48 @@ func (c *Client) Watch(since, timeoutSec int) (json.RawMessage, error) {
 	return out, err
 }
 
+// Cold converts this collection to disk-resident storage. Irreversible.
+func (c *Client) Cold() error {
+	return c.do("POST", "/cold", map[string]any{"db": c.db, "coll": c.coll}, nil)
+}
+
+// Compact folds WAL chunks (or cold runs) into a fresh generation.
+func (c *Client) Compact() error {
+	return c.do("POST", "/compact", map[string]any{"db": c.db, "coll": c.coll}, nil)
+}
+
+// Verify runs an integrity check (checksums, manifests vs pages, declared
+// indexes). It returns an error when the collection is damaged.
+func (c *Client) Verify() (json.RawMessage, error) {
+	var out json.RawMessage
+	err := c.do("GET", "/verify?"+c.qs(), nil, &out)
+	return out, err
+}
+
+// Export dumps the collection. Empty where means everything.
+func (c *Client) Export(where string) (*FindResult, error) {
+	var out FindResult
+	err := c.do("GET", "/export?"+c.qs()+"&where="+url.QueryEscape(where), nil, &out)
+	return &out, err
+}
+
+// ExportLines dumps the collection as NDJSON "<id>\t<doc>" text, which can be
+// piped straight into another grange's Bulk.
+func (c *Client) ExportLines() (string, error) {
+	req, err := http.NewRequest("GET", c.Base+"/export?"+c.qs()+"&format=lines", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return string(b), err
+}
+
 // Usage returns the tenant's storage/billing view as raw JSON.
 func (c *Client) Usage() (json.RawMessage, error) {
 	var out json.RawMessage
