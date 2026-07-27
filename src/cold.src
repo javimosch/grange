@@ -371,3 +371,79 @@ func cold_count_est() (n) {
     i := 0
     while i < len(g_run_count) { n = n + g_run_count[i]  i = i + 1 }
 }
+
+// cold_bulk_direct writes a whole batch as its OWN run, bypassing the memtable.
+//
+// Staging a large batch through the memtable means every doc, plus the WAL
+// chunk built from it, stays on the actor's arena until a flush — which is why
+// a 100k-doc load peaked far above the hosted RSS budget. Writing the batch
+// straight to pages lets the caller wrap the work in arena { }: nothing needs to
+// survive except the files themselves, and the run list is re-read from disk
+// afterwards (cold_load_runs) so the in-memory manifest state is rebuilt clean.
+//
+// The caller MUST flush the memtable first: the memtable shadows runs, so an
+// older unflushed doc would otherwise hide this newer batch. Returns ops applied
+// (-1 on a write failure).
+func cold_bulk_direct(body, rid) (nops) {
+    nops = 0
+    est := gr_count_lines(body)
+    if est == 0 { return }
+    pcount := cold_pow2_pages(est)
+    // ONE pass over the batch, routing each record to its page's accumulator.
+    // (Walking the body once per page cost 32 copies of a 10k-doc batch and put
+    // the RSS peak at ~170 MB — the very thing this path exists to avoid.)
+    parts := make(map[int][]string)
+    cnt := make(map[int]int)
+    pos := 0
+    while true {
+        ln, next, more := gr_next_line(body, pos)
+        if more == 0 { break }
+        pos = next
+        t := trim(ln)
+        if len(t) > 0 {
+            if has_prefix(t, "-\t") {
+                id := substr(t, 2, len(t))
+                k := cold_hash(id) & (pcount - 1)
+                parts[k] = append(parts[k], "d|" + id)
+                cnt[k] = cnt[k] + 1
+            } else {
+                tabp := index(t, "\t")
+                if tabp > 0 {
+                    id := substr(t, 0, tabp)
+                    k := cold_hash(id) & (pcount - 1)
+                    parts[k] = append(parts[k], "p|" + id)
+                    parts[k] = append(parts[k], substr(t, tabp + 1, len(t)))
+                    cnt[k] = cnt[k] + 1
+                }
+            }
+        }
+    }
+    k := 0
+    while k < pcount {
+        if gr_write_recfile(gr_dir() + "/" + cold_page_name(rid, k), parts[k], cnt[k]) == 0 { nops = -1  return }
+        nops = nops + cnt[k]
+        k = k + 1
+    }
+    meta := []string{}
+    meta = append(meta, "p|meta")
+    meta = append(meta, "{\"pages\":" + str(pcount) + ",\"count\":" + str(nops) + ",\"fields\":\"" + join(g_cifields, ",") + "\",\"iparts\":" + str(cold_idx_parts()) + "}")
+    // index pages first, manifest LAST: a crash before the manifest leaves an
+    // incomplete run that recovery ignores, exactly like a flush
+    if len(g_cifields) > 0 {
+        if cold_build_indexes(rid, pcount) == 0 { nops = -1  return }
+    }
+    if gr_write_recfile(gr_dir() + "/" + cold_meta_name(rid), meta, 1) == 0 { nops = -1  return }
+}
+
+// cold_next_rid is the rid a new run may claim in the current generation.
+func cold_next_rid() (rid) {
+    rid = 1
+    if len(g_run_rid) > 0 { rid = g_run_rid[len(g_run_rid) - 1] + 1 }
+}
+
+// cold_bulk_threshold: batches at least this large go straight to a run
+// (0 disables the path; 1 forces it, which the fuzzes use).
+func cold_bulk_threshold() (n) {
+    n = parse_int(env("GRANGE_BULK_DIRECT"))
+    if n == 0 { n = 500 }
+}

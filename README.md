@@ -120,6 +120,12 @@ takes ~0.9 s per field. Candidates are always re-verified against the
 authoritative doc, so a stale index entry (overwritten, moved or deleted doc)
 can never leak into results.
 
+Bulk ingest into a cold collection writes each large batch as **its own run**,
+straight to pages, so loading never stages the data through memory: a 100k-doc
+load peaks at **65 MB** (was 172 MB) and stays under the hosted budget.
+`GRANGE_BULK_DIRECT` sets the batch size that takes this path (default 500; 1
+forces it, which the fuzzes use).
+
 Trade-offs, enforced: no TTL docs on cold collections, range/`~=` clauses still
 scan (only equality clauses use the index), `stats` reports `docs_estimate`
 (an exact cold count streams every page), and gets go from ~µs to ~100 µs.

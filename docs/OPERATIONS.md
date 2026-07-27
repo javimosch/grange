@@ -96,6 +96,12 @@ performing anything state-mutating (TTL sweep, dirty range-projection rebuild)
 | 5 × find(2000 docs) | 673 MB (+4) |
 | 50 point gets | **673 MB (+0)** |
 
+(M24 update: bulk ingest into a cold collection now writes each large batch
+directly to its own run instead of staging it through the memtable, so a 100k
+load peaks at 65 MB rather than 172 MB — under the hosted 100 MB budget, no
+watchdog restart. What remains per request is the request body itself, which
+would need the whole HTTP read path scoped.)
+
 Query serving is now flat — RSS settles at the working-set peak instead of
 climbing per request. What still grows is the write/build path (bulk load and
 index build), which retains data by nature; the watchdog remains the guard for

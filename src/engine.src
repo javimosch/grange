@@ -119,6 +119,24 @@ func gr_load_recbody(path) (body, ok) {
     ok = 1
 }
 
+// gr_count_lines counts newline-separated records WITHOUT materialising any
+// line (pure index arithmetic): sizing a run must not cost a full copy of the
+// batch.
+func gr_count_lines(body) (n) {
+    n = 0
+    pos := 0
+    total := len(body)
+    while pos < total {
+        nl := bytes_index(body, g_nl, pos)
+        if nl < 0 {
+            if total - pos > 1 { n = n + 1 }
+            return
+        }
+        if nl - pos > 1 { n = n + 1 }
+        pos = nl + 1
+    }
+}
+
 // gr_next_line walks a body: (line, next position, more).
 func gr_next_line(body, pos) (line, next, more) {
     line = ""

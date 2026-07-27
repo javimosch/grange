@@ -196,7 +196,46 @@ func uc_index_numeric_and_batch() {
     assert_eq_str(cv, "225", "count after rebuild")
 }
 
+// The direct-to-run bulk path (M24) skips the memtable entirely, so it must
+// reproduce the same shadowing rules as a flush: a newer run wins, a tombstone
+// hides an older doc, and the run must be self-describing after a reopen.
+func uc_bulk_direct() {
+    db := uc_dir()
+    uc_seed(db, "c", 300)
+    cok, cerr := gr_cold_enable()
+    assert_eq_int(cok, 1, "cold enable")
+    // a direct run written on top of the existing data
+    body := bytes("k0\t{\"i\":-1,\"grp\":\"gz\",\"tag\":\"t0\"}\n-\tk1\nnew1\t{\"i\":-2,\"grp\":\"gz\",\"tag\":\"tz\"}\n")
+    assert_eq_int(cold_flush(), 1, "flush before direct write")
+    rid := cold_next_rid()
+    applied := cold_bulk_direct(body, rid)
+    assert_eq_int(applied, 3, "three ops written to their own run")
+    cold_load_runs()
+    doc, found := gr_get("k0")
+    iv, ierr := json_get(doc, ".i")
+    assert_eq_str(iv, "-1", "direct run shadows the older doc")
+    doc, found = gr_get("k1")
+    assert_eq_int(found, 0, "direct-run tombstone hides the older doc")
+    doc, found = gr_get("new1")
+    assert_eq_int(found, 1, "new doc from the direct run is readable")
+    assert_eq_int(gr_count(), 300, "count: 300 - 1 deleted + 1 new")
+    // and it survives a reopen (manifest written last, so the run is complete)
+    ok, errmsg := gr_open(db, "c")
+    assert_eq_int(gr_count(), 300, "direct run durable across reopen")
+    doc, found = gr_get("k1")
+    assert_eq_int(found, 0, "tombstone durable")
+    doc, found = gr_get("k0")
+    iv, ierr = json_get(doc, ".i")
+    assert_eq_str(iv, "-1", "shadowing durable")
+    // a compaction folds it away without changing any answer
+    assert_eq_int(gr_compact(), 1, "compact after a direct run")
+    assert_eq_int(gr_count(), 300, "count preserved by compaction")
+    doc, found = gr_get("k1")
+    assert_eq_int(found, 0, "delete stays deleted after compaction")
+}
+
 func main() {
+    uc_bulk_direct()
     uc_hash_partitioning()
     uc_enable_and_read()
     uc_shadowing()

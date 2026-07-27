@@ -300,6 +300,31 @@ func srv_handle(req) (res) {
             }
             i = i + 1
         }
+        // A large batch on a cold collection is written as its own run: the
+        // memtable is flushed first (it shadows runs, so an older unflushed doc
+        // would hide this newer batch), then the whole write happens inside an
+        // arena and the manifest state is re-read from disk. Ingest therefore
+        // retains nothing between requests.
+        if g_cold == 1 && nlines >= cold_bulk_threshold() {
+            if cold_flush() == 0 {
+                res = srv_err("500 Internal Server Error", "internal", "flush before direct bulk failed")
+                return
+            }
+            rid := cold_next_rid()
+            applied := 0
+            arena { applied = escape(cold_bulk_direct(bytes(req.body), rid)) }
+            if applied < 0 {
+                res = srv_err("500 Internal Server Error", "internal", "direct bulk write failed")
+                return
+            }
+            cold_load_runs()
+            // watchers can't be handed 10k individual changes (the ring holds
+            // 400): advance the sequence so anyone behind gets resync=1, which
+            // is the designed fallback for "you are too far behind to patch"
+            g_seq = g_seq + applied
+            res = srv_ok("{\"ops\":" + str(applied) + ",\"mode\":\"direct-run\",\"ids\":[]}")
+            return
+        }
         // pass 2: stage + single commit
         ids := []string{}
         nops := 0
