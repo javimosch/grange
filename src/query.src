@@ -125,6 +125,21 @@ func wh_candidates(fields, ops, vals) (ids, mode) {
 
 // q_find / q_count / q_agg are the query layer — pure data-JSON in/out,
 // shared by the CLI verbs and the HTTP server.
+// q_warm runs every step of a query that can MUTATE persistent state — the TTL
+// sweep (which deletes and commits) and a dirty range projection rebuild — so
+// that the query proper allocates nothing the caller must keep. Call it before
+// wrapping a query in arena { }: inside the block those steps then find nothing
+// to do, so no arena-allocated value ends up in a global (which would dangle).
+func q_warm(wh) {
+    gr_sweep_expired()
+    fields, ops, vals := wh_pairs(wh)
+    i := 0
+    while i < len(fields) {
+        if g_cold == 0 && ix_is_indexed(fields[i]) == 1 && g_ikind[fields[i]] == "range" { rb_ensure(fields[i]) }
+        i = i + 1
+    }
+}
+
 // q_cold_scan streams page groups, matching + collecting up to limit items.
 // mode 2 = count only. Returns (items, n).
 func q_cold_scan(fields, ops, vals, limit, countonly) (items, n) {

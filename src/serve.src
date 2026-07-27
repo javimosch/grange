@@ -222,12 +222,19 @@ func srv_handle(req) (res) {
     }
     if req.method == "GET" && has_prefix(req.path, "/get") {
         id := query(req, "id")
-        doc, found := gr_get(id)
-        if found == 0 {
+        gr_sweep_expired()
+        gdoc := ""
+        gfound := 0
+        arena {
+            gotdoc, gotfound := gr_get(id)
+            gdoc = escape(gotdoc)
+            gfound = gotfound
+        }
+        if gfound == 0 {
             res = srv_err("404 Not Found", "not-found", "no document with id " + id)
             return
         }
-        res = srv_ok("{\"id\":\"" + jesc(id) + "\",\"doc\":" + doc + "}")
+        res = srv_ok("{\"id\":\"" + jesc(id) + "\",\"doc\":" + gdoc + "}")
         return
     }
     if req.method == "POST" && (req.path == "/del" || has_prefix(req.path, "/del?")) {
@@ -246,7 +253,13 @@ func srv_handle(req) (res) {
     if req.method == "GET" && has_prefix(req.path, "/find") {
         limit := parse_int(query(req, "limit"))
         if limit == 0 { limit = 100 }
-        res = srv_ok(q_find(query(req, "where"), limit))
+        wh := query(req, "where")
+        q_warm(wh)
+        // the query reads pages and builds strings that die with the response;
+        // only the body escapes, so the loop's arena stays flat (machin escape())
+        body := ""
+        arena { body = escape(q_find(wh, limit)) }
+        res = srv_ok(body)
         return
     }
     // bulk: newline-delimited ops, ONE commit for the whole batch.
@@ -362,11 +375,19 @@ func srv_handle(req) (res) {
             res = response("200 OK", "text/plain", join(lines, "\n"))
             return
         }
-        res = srv_ok(q_find(query(req, "where"), 0))
+        wh := query(req, "where")
+        q_warm(wh)
+        body := ""
+        arena { body = escape(q_find(wh, 0)) }
+        res = srv_ok(body)
         return
     }
     if req.method == "GET" && has_prefix(req.path, "/count") {
-        res = srv_ok(q_count(query(req, "where")))
+        wh := query(req, "where")
+        q_warm(wh)
+        body := ""
+        arena { body = escape(q_count(wh)) }
+        res = srv_ok(body)
         return
     }
     if req.method == "GET" && has_prefix(req.path, "/agg") {
@@ -375,7 +396,12 @@ func srv_handle(req) (res) {
             res = srv_err("400 Bad Request", "input", "missing group-by query param")
             return
         }
-        res = srv_ok(q_agg_full(f, query(req, "sum"), query(req, "minmax")))
+        q_warm("")
+        sumspec := query(req, "sum")
+        mmspec := query(req, "minmax")
+        body := ""
+        arena { body = escape(q_agg_full(f, sumspec, mmspec)) }
+        res = srv_ok(body)
         return
     }
     if req.method == "POST" && (req.path == "/index" || has_prefix(req.path, "/index?")) {

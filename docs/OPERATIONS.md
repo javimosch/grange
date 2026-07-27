@@ -67,9 +67,39 @@ Mitigations in place:
 - Parked `/watch` clients are dropped by a restart and must reconnect (the SDKs
   poll again with their last `seq`, which is the normal long-poll cycle).
 
-Next engine milestone: per-request arena scoping. Either handle each request in
-a short-lived goroutine (machweb's own `serve` does this — but it trades the
-single-actor race-freedom property) or extend ARENA001 to prove escapes
-interprocedurally so the whole read path can be wrapped. Until then the
-watchdog is the guard, and a request-heavy instance should be sized with the
-restart in mind.
+### Update (same day): fixed upstream in machin
+
+The next milestone turned out to be two compiler changes rather than a grange
+restructure (machin PR #534):
+
+- **`escape(v)`** carries exactly one value out of an `arena { }` block (copied
+  into the enclosing arena before the block is reclaimed), so a handler can do
+  heavy transient work and return one answer. ARENA001 still refuses every
+  *other* escape, so the proof keeps its teeth.
+- **Scoped maps** are now allocated from the current arena. Maps were
+  malloc-only with no free path anywhere, so every transient map — a per-page
+  group, a per-request lookup table — leaked permanently and defeated arena
+  blocks entirely for map-using code. Long-lived maps (main arena) keep
+  malloc + per-entry free, so delete-heavy caches are unaffected.
+
+grange's read routes now run inside `arena { … escape(body) }`, with `q_warm()`
+performing anything state-mutating (TTL sweep, dirty range-projection rebuild)
+*before* the block so nothing allocated inside is retained. Measured again at
+100k cold docs, same sequence as the table above:
+
+| phase | RSS after |
+|---|---|
+| 100k cold load | 221 MB |
+| build a cold index | 613 MB |
+| 20 indexed counts | 669 MB |
+| 10 scanning counts | **669 MB (+0)** |
+| 5 × find(2000 docs) | 673 MB (+4) |
+| 50 point gets | **673 MB (+0)** |
+
+Query serving is now flat — RSS settles at the working-set peak instead of
+climbing per request. What still grows is the write/build path (bulk load and
+index build), which retains data by nature; the watchdog remains the guard for
+those, and an index build over a very large collection can still trip it (a
+restart mid-build is safe: without its manifest an incomplete run is ignored,
+the declaration persists, and queries fall back to scanning until a later
+compaction rebuilds it).
