@@ -2,7 +2,9 @@
 # M22: hunt for cold-vs-hot divergence with long random op streams over many
 # seeds. The in-suite test runs one short stream for CI; this is the deep run.
 set -u
-MODS="framework/machweb.src src/engine.src src/registry.src src/cold.src src/coldindex.src src/index.src src/range.src src/query.src src/watch.src src/tenant.src src/serve.src"
+# derive the module list from the Makefile: a hardcoded copy silently rotted
+# when new modules landed, and a compile error then looked like a divergence
+MODS=$(grep -m1 -o 'machin test [^|]*tests/' Makefile | sed 's/machin test //; s/tests\///')
 OPS="${1:-1500}"
 SEEDS="${2:-8}"
 fails=0

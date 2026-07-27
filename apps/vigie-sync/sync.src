@@ -1,0 +1,190 @@
+// vigie-sync — mirror a live vigie analytics database into grange.
+//
+// grange's first real workload. Deliberately a SIDECAR, not a change to vigie:
+// it opens vigie's SQLite read-only and replays new rows into a grange
+// collection, so a live product carries none of the risk of the experiment. The
+// SQLite side stays the source of truth and therefore the ORACLE — every number
+// grange reports can be checked against it (see `compare`).
+//
+// Analytics is the shape grange should be best at: append-only writes, aggregate
+// reads, time-bounded retention. Events go into a COLD collection (they are
+// archival by nature), written through the direct-to-run bulk path.
+//
+//   vigie-sync sync    --sqlite /opt/vigie/vigie.db --grange http://127.0.0.1:8801 --token gt_...
+//   vigie-sync compare --sqlite ... --grange ... --token ...
+//
+// The cursor (last synced rowid) lives in grange itself — one more dogfood.
+
+type VigieRow struct {
+    id int
+    ts int
+    site string
+    kind string
+    name string
+    path string
+    ref string
+    country string
+    device string
+    browser string
+    os string
+}
+
+func vs_client(fs) (g) {
+    base := flag_get(fs, "grange")
+    if len(base) == 0 { base = "http://127.0.0.1:8801" }
+    tok := flag_get(fs, "token")
+    if len(tok) == 0 { tok = env("VIGIE_SYNC_TOKEN") }
+    if len(tok) == 0 { emit_err(81, "input", "missing --token (or VIGIE_SYNC_TOKEN)", 1, "pass a grange tenant token") }
+    g = grange_client(base, tok)
+    g = grange_use(g, flag_get(fs, "db-name"), "events")
+}
+
+func vs_sqlite(fs) (db) {
+    p := flag_get(fs, "sqlite")
+    if len(p) == 0 { p = "/opt/vigie/vigie.db" }
+    db = sqlite_open(p)
+    if db == 0 { emit_err(103, "integration", "cannot open vigie sqlite at " + p, 1, "check the path and read permission") }
+}
+
+// vs_cursor reads/writes the last synced rowid, stored in grange itself.
+func vs_cursor_get(g) (id) {
+    id = 0
+    cg := grange_use(g, g.db, "sync_state")
+    doc, found := grange_get(cg, "cursor")
+    if found == 1 {
+        v, err := json_get(doc, ".last_id")
+        if len(err) == 0 { id = parse_int(v) }
+    }
+}
+
+func vs_cursor_set(g, id, synced) {
+    cg := grange_use(g, g.db, "sync_state")
+    gid, ok := grange_put(cg, "cursor", "{\"last_id\":" + str(id) + ",\"synced_total\":" + str(synced) + ",\"at\":" + str(now_ms()) + "}")
+}
+
+// vs_doc renders one vigie row as a grange document. Field names stay close to
+// vigie's columns so a comparison query reads the same on both sides.
+func vs_doc(r) (d) {
+    d = "{\"ts\":" + str(r.ts) +
+        ",\"day\":\"" + time_format_utc(r.ts, "%Y-%m-%d") + "\"" +
+        ",\"site\":\"" + jesc(r.site) + "\"" +
+        ",\"kind\":\"" + jesc(r.kind) + "\"" +
+        ",\"name\":\"" + jesc(r.name) + "\"" +
+        ",\"path\":\"" + jesc(r.path) + "\"" +
+        ",\"ref\":\"" + jesc(r.ref) + "\"" +
+        ",\"country\":\"" + jesc(r.country) + "\"" +
+        ",\"device\":\"" + jesc(r.device) + "\"" +
+        ",\"browser\":\"" + jesc(r.browser) + "\"" +
+        ",\"os\":\"" + jesc(r.os) + "\"}"
+}
+
+func cmd_sync(fs) {
+    g := vs_client(fs)
+    db := vs_sqlite(fs)
+    batch := flag_int_val(fs, "batch")
+    if batch < 1 { batch = 1000 }
+    cursor := vs_cursor_get(g)
+    total := 0
+    rounds := 0
+    while rounds < 10000 {
+        rows := sqlite_query(db, "SELECT id, ts, site, kind, name, path, ref, country, device, browser, os FROM events WHERE id > ? ORDER BY id LIMIT " + str(batch), []string{str(cursor)})
+        evs := parse(rows, []VigieRow{})
+        if len(evs) == 0 { break }
+        lines := []string{}
+        i := 0
+        while i < len(evs) {
+            lines = append(lines, "e" + str(evs[i].id) + "\t" + vs_doc(evs[i]))
+            if evs[i].id > cursor { cursor = evs[i].id }
+            i = i + 1
+        }
+        n := grange_bulk(g, join(lines, "\n"))
+        if n < 0 { emit_err(103, "integration", "grange bulk failed at cursor " + str(cursor), 1, "check the grange url/token and retry — the cursor is only advanced after a successful batch") }
+        total = total + n
+        vs_cursor_set(g, cursor, total)
+        write(2, "{\"event\":\"batch\",\"rows\":" + str(n) + ",\"cursor\":" + str(cursor) + "}\n")
+        rounds = rounds + 1
+    }
+    sqlite_close(db)
+    emit_ok("{\"synced\":" + str(total) + ",\"cursor\":" + str(cursor) + "}")
+}
+
+// cmd_compare treats SQLite as the oracle: every aggregate grange reports must
+// match it exactly, or the mirror is not trustworthy.
+func cmd_compare(fs) {
+    g := vs_client(fs)
+    db := vs_sqlite(fs)
+    mismatches := []string{}
+    checks := 0
+
+    srows := sqlite_query(db, "SELECT COUNT(*) AS c FROM events", []string{})
+    sc, scerr := json_get(srows, "[0].c")
+    gcount := grange_count(g, "")
+    checks = checks + 1
+    if parse_int(sc) != gcount {
+        mismatches = append(mismatches, "{\"check\":\"total\",\"sqlite\":" + sc + ",\"grange\":" + str(gcount) + "}")
+    }
+
+    // per-site counts: the aggregate an analytics dashboard actually asks for
+    sites := sqlite_query(db, "SELECT site, COUNT(*) AS c FROM events GROUP BY site ORDER BY c DESC LIMIT 10", []string{})
+    n := 0
+    while n < 10 {
+        sname, serr := json_get(sites, "[" + str(n) + "].site")
+        if len(serr) > 0 { break }
+        scnt, cerr := json_get(sites, "[" + str(n) + "].c")
+        gc := grange_count(g, "site=" + wh_unquote(sname))
+        checks = checks + 1
+        if parse_int(scnt) != gc {
+            mismatches = append(mismatches, "{\"check\":\"site\",\"value\":" + sname + ",\"sqlite\":" + scnt + ",\"grange\":" + str(gc) + "}")
+        }
+        n = n + 1
+    }
+
+    // per-kind counts
+    kinds := sqlite_query(db, "SELECT kind, COUNT(*) AS c FROM events GROUP BY kind", []string{})
+    n = 0
+    while n < 8 {
+        kname, kerr := json_get(kinds, "[" + str(n) + "].kind")
+        if len(kerr) > 0 { break }
+        kcnt, cerr := json_get(kinds, "[" + str(n) + "].c")
+        gc := grange_count(g, "kind=" + wh_unquote(kname))
+        checks = checks + 1
+        if parse_int(kcnt) != gc {
+            mismatches = append(mismatches, "{\"check\":\"kind\",\"value\":" + kname + ",\"sqlite\":" + kcnt + ",\"grange\":" + str(gc) + "}")
+        }
+        n = n + 1
+    }
+
+    // a time range — the query every analytics dashboard runs, and the one that
+    // shows whether cold collections can answer it without a full scan
+    cut := now() - 86400
+    trows := sqlite_query(db, "SELECT COUNT(*) AS c FROM events WHERE ts >= ?", []string{str(cut)})
+    tc, tcerr := json_get(trows, "[0].c")
+    t0 := now_ms()
+    grange_day := grange_count(g, "ts>=" + str(cut))
+    tms := now_ms() - t0
+    checks = checks + 1
+    if parse_int(tc) != grange_day {
+        mismatches = append(mismatches, "{\"check\":\"last_24h\",\"sqlite\":" + tc + ",\"grange\":" + str(grange_day) + "}")
+    }
+
+    sqlite_close(db)
+    okstr := "true"
+    if len(mismatches) > 0 { okstr = "false" }
+    emit_ok("{\"match\":" + okstr + ",\"checks\":" + str(checks) + ",\"last_24h_query_ms\":" + str(tms) + ",\"mismatches\":[" + join(mismatches, ",") + "]}")
+}
+
+func main() {
+    fs := new_flags("vigie-sync")
+    fs = flag_str(fs, "sqlite", "s", "/opt/vigie/vigie.db", "path to vigie's SQLite database (read-only)")
+    fs = flag_str(fs, "grange", "g", "http://127.0.0.1:8801", "grange base URL")
+    fs = flag_str(fs, "token", "t", "", "grange tenant token (or VIGIE_SYNC_TOKEN)")
+    fs = flag_str(fs, "db-name", "d", "vigie", "grange database name")
+    fs = flag_int(fs, "batch", "b", "1000", "rows per batch")
+    fs = parse_flags(fs, args())
+    if flag_on(fs, "help") { println(flag_usage(fs))  return }
+    rest := flag_args(fs)
+    if len(rest) == 0 { emit_err(80, "input", "missing verb: sync | compare", 1, "vigie-sync sync --token gt_...") }
+    if rest[0] == "sync" { cmd_sync(fs)  return }
+    if rest[0] == "compare" { cmd_compare(fs)  return }
+    emit_err(80, "input", "unknown verb: " + rest[0], 1, "use sync or compare")
+}

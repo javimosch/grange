@@ -136,6 +136,10 @@ func main() {
             ok, errmsg = gr_use(d_db, "cold")
             gr_index_add("grp", "", "")
             gr_index_add("tag", "", "")
+            // an ORDERED index on the numeric field, so the range clauses in
+            // d_observe ("v>=50") exercise the cold-range path against the hot
+            // oracle for the rest of the stream
+            gr_index_add("v", "", "range")
             indexed = 1
         }
         step = step + 1

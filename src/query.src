@@ -182,8 +182,10 @@ func q_find(wh, limit) (data) {
     fields, ops, vals := wh_pairs(wh)
     if g_cold == 1 {
         xitems, xn, xused := q_cold_index(fields, ops, vals, limit, 0)
-        if xused == 1 {
-            data = "{\"count\":" + str(xn) + ",\"mode\":\"cold-index\",\"items\":[" + join(xitems, ",") + "]}"
+        if xused > 0 {
+            xmode := "cold-index"
+            if xused == 2 { xmode = "cold-range" }
+            data = "{\"count\":" + str(xn) + ",\"mode\":\"" + xmode + "\",\"items\":[" + join(xitems, ",") + "]}"
             return
         }
         items, n := q_cold_scan(fields, ops, vals, limit, 0)
@@ -232,8 +234,10 @@ func q_count(wh) (data) {
     }
     if g_cold == 1 {
         xitems, xn, xused := q_cold_index(fields, ops, vals, 0, 1)
-        if xused == 1 {
-            data = "{\"count\":" + str(xn) + ",\"mode\":\"cold-index\"}"
+        if xused > 0 {
+            xmode := "cold-index"
+            if xused == 2 { xmode = "cold-range" }
+            data = "{\"count\":" + str(xn) + ",\"mode\":\"" + xmode + "\"}"
             return
         }
         items, n := q_cold_scan(fields, ops, vals, 0, 1)

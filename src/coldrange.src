@@ -1,0 +1,240 @@
+// grange cold RANGE indexes — M25, ordered by a real workload.
+//
+// Cold collections had equality indexes only (value-hash-partitioned pages: one
+// page read per lookup, but hashing destroys order). Mirroring a live analytics
+// database into grange showed why that is not enough: every analytics question
+// is a time range ("last 24h"), and those were full scans.
+//
+// A range index stores the field's (value, id) pairs SORTED, split into pages of
+// a fixed size, plus a boundary file recording each page's min/max:
+//
+//   crun-<gen>-<rid>-r<slug>-p<k>.grg   sorted "p|<value>" + "<id>" pairs
+//   crun-<gen>-<rid>-r<slug>.rmeta      one line per page: {"min":..,"max":..,"n":..}
+//
+// A query reads the boundaries (small, one file per run) and then only the pages
+// whose interval overlaps the predicate. Candidates are re-verified through
+// cold_idx_resolve exactly like the equality path, so a stale entry can never
+// leak — the index only ever narrows what is read.
+
+var g_cikind = make(map[string]string)
+
+func cold_rng_per_page() (n) {
+    n = parse_int(env("GRANGE_RANGE_PAGE"))
+    if n == 0 { n = 2000 }
+}
+
+func cold_rng_name(rid, field, k) (s) {
+    s = "crun-" + gr_pad6(g_gen) + "-" + gr_pad6(rid) + "-r" + cold_fslug(field) + "-p" + gr_pad6(k) + ".grg"
+}
+
+func cold_rng_meta_name(rid, field) (s) {
+    s = "crun-" + gr_pad6(g_gen) + "-" + gr_pad6(rid) + "-r" + cold_fslug(field) + ".rmeta"
+}
+
+func cold_is_range(f) (yes) {
+    yes = 0
+    if g_cikind[f] == "range" { yes = 1 }
+}
+
+// cold_rng_write sorts (vals, ids) and writes the paged, ordered index.
+func cold_rng_write(rid, field, vals, ids) (ok) {
+    ok = 1
+    n := len(vals)
+    if n == 0 {
+        // an empty index is still a complete one: record zero pages
+        empty := []string{}
+        if gr_write_recfile(gr_dir() + "/" + cold_rng_meta_name(rid, field), empty, 0) == 0 { ok = 0 }
+        return
+    }
+    sv, si := rb_msort(vals, ids)
+    per := cold_rng_per_page()
+    npages := n / per
+    if n % per != 0 { npages = npages + 1 }
+    meta := []string{}
+    k := 0
+    while k < npages {
+        lo := k * per
+        hi := lo + per
+        if hi > n { hi = n }
+        lines := []string{}
+        i := lo
+        while i < hi {
+            lines = append(lines, "p|" + ix_fstr(sv[i]))
+            lines = append(lines, si[i])
+            i = i + 1
+        }
+        if gr_write_recfile(gr_dir() + "/" + cold_rng_name(rid, field, k), lines, hi - lo) == 0 { ok = 0  return }
+        meta = append(meta, "p|" + str(k))
+        meta = append(meta, "{\"min\":" + ix_fstr(sv[lo]) + ",\"max\":" + ix_fstr(sv[hi-1]) + ",\"n\":" + str(hi - lo) + "}")
+        k = k + 1
+    }
+    if gr_write_recfile(gr_dir() + "/" + cold_rng_meta_name(rid, field), meta, npages) == 0 { ok = 0 }
+}
+
+// cold_rng_from_docs builds the index for a run from an id->doc map (flush path:
+// the memtable is bounded, so sorting it is cheap).
+func cold_rng_from_docs(rid, field, docs) (ok) {
+    vals := []float{}
+    ids := []string{}
+    dids := keys(docs)
+    i := 0
+    while i < len(dids) {
+        tok := ix_field_tok(docs[dids[i]], field)
+        if len(tok) > 0 {
+            c := charat(tok, 0)
+            if c != "\"" && c != "{" && c != "[" && c != "t" && c != "f" && c != "n" {
+                vals = append(vals, parse_float(tok))
+                ids = append(ids, dids[i])
+            }
+        }
+        i = i + 1
+    }
+    ok = cold_rng_write(rid, field, vals, ids)
+}
+
+// cold_rng_from_pages builds the index for a run whose data pages already exist
+// (declaration and compaction paths). Honest limit: it sorts the field's entries
+// in memory — bounded by the collection, not by a page — so an index build over
+// a very large cold collection is the one operation that still scales with size.
+func cold_rng_from_pages(rid, pcount, field) (ok) {
+    vals := []float{}
+    ids := []string{}
+    k := 0
+    while k < pcount {
+        body, rok := gr_load_recbody(gr_dir() + "/" + cold_page_name(rid, k))
+        if rok == 1 {
+            pos := 0
+            while true {
+                ln, next, more := gr_next_line(body, pos)
+                if more == 0 { break }
+                pos = next
+                if has_prefix(ln, "p|") {
+                    dline, dnext, dmore := gr_next_line(body, pos)
+                    if dmore == 0 { break }
+                    pos = dnext
+                    tok := ix_field_tok(dline, field)
+                    if len(tok) > 0 {
+                        c := charat(tok, 0)
+                        if c != "\"" && c != "{" && c != "[" && c != "t" && c != "f" && c != "n" {
+                            vals = append(vals, parse_float(tok))
+                            ids = append(ids, substr(ln, 2, len(ln)))
+                        }
+                    }
+                }
+            }
+        }
+        k = k + 1
+    }
+    ok = cold_rng_write(rid, field, vals, ids)
+}
+
+// cold_rng_overlaps: can a page holding [pmin,pmax] contain a match for op/x?
+func cold_rng_overlaps(pmin, pmax, op, x) (yes) {
+    yes = 0
+    if op == ">" { if pmax > x { yes = 1 }  return }
+    if op == ">=" { if pmax >= x { yes = 1 }  return }
+    if op == "<" { if pmin < x { yes = 1 }  return }
+    if op == "<=" { if pmin <= x { yes = 1 }  return }
+    if op == "=" { if pmin <= x && pmax >= x { yes = 1 } }
+}
+
+func cold_rng_matches(v, op, x) (yes) {
+    yes = 0
+    if op == ">" { if v > x { yes = 1 }  return }
+    if op == ">=" { if v >= x { yes = 1 }  return }
+    if op == "<" { if v < x { yes = 1 }  return }
+    if op == "<=" { if v <= x { yes = 1 }  return }
+    if op == "=" { if v == x { yes = 1 } }
+}
+
+// cold_rng_candidates collects ids whose value satisfies op/x, reading only the
+// pages whose recorded interval can contain a match, plus the memtable.
+func cold_rng_candidates(field, op, xs) (ids, pages_read) {
+    ids = []string{}
+    pages_read = 0
+    x := parse_float(xs)
+    seen := make(map[string]int)
+    r := 0
+    while r < len(g_run_rid) {
+        rid := g_run_rid[r]
+        mbody, mok := gr_load_recbody(gr_dir() + "/" + cold_rng_meta_name(rid, field))
+        if mok == 1 {
+            pos := 0
+            while true {
+                kline, knext, kmore := gr_next_line(mbody, pos)
+                if kmore == 0 { break }
+                pos = knext
+                if has_prefix(kline, "p|") {
+                    jline, jnext, jmore := gr_next_line(mbody, pos)
+                    if jmore == 0 { break }
+                    pos = jnext
+                    k := parse_int(substr(kline, 2, len(kline)))
+                    mn, mnerr := json_get(jline, ".min")
+                    mx, mxerr := json_get(jline, ".max")
+                    if len(mnerr) == 0 && len(mxerr) == 0 {
+                        if cold_rng_overlaps(parse_float(mn), parse_float(mx), op, x) == 1 {
+                            pbody, pok := gr_load_recbody(gr_dir() + "/" + cold_rng_name(rid, field, k))
+                            pages_read = pages_read + 1
+                            if pok == 1 {
+                                ppos := 0
+                                while true {
+                                    vln, vnext, vmore := gr_next_line(pbody, ppos)
+                                    if vmore == 0 { break }
+                                    ppos = vnext
+                                    if has_prefix(vln, "p|") {
+                                        idln, inext, imore := gr_next_line(pbody, ppos)
+                                        if imore == 0 { break }
+                                        ppos = inext
+                                        if cold_rng_matches(parse_float(substr(vln, 2, len(vln))), op, x) == 1 {
+                                            if has(seen, idln) == false {
+                                                seen[idln] = 1
+                                                ids = append(ids, idln)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        r = r + 1
+    }
+    mids := keys(g_mem)
+    i := 0
+    while i < len(mids) {
+        tok := ix_field_tok(g_mem[mids[i]], field)
+        if len(tok) > 0 {
+            if cold_rng_matches(ix_tok_num(tok), op, x) == 1 {
+                if has(seen, mids[i]) == false {
+                    seen[mids[i]] = 1
+                    ids = append(ids, mids[i])
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// cold_rng_usable finds the first range clause on a ready cold range index.
+func cold_rng_usable(fields, ops, vals) (field, op, val, ok) {
+    field = ""
+    op = ""
+    val = ""
+    ok = 0
+    if g_cold == 0 { return }
+    i := 0
+    while i < len(fields) {
+        if ops[i] != "=" && ops[i] != "~=" {
+            if cold_is_range(fields[i]) == 1 && cold_idx_ready(fields[i]) == 1 {
+                field = fields[i]
+                op = ops[i]
+                val = vals[i]
+                ok = 1
+                return
+            }
+        }
+        i = i + 1
+    }
+}

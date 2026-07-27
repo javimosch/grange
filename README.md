@@ -126,8 +126,14 @@ load peaks at **65 MB** (was 172 MB) and stays under the hosted budget.
 `GRANGE_BULK_DIRECT` sets the batch size that takes this path (default 500; 1
 forces it, which the fuzzes use).
 
-Trade-offs, enforced: no TTL docs on cold collections, range/`~=` clauses still
-scan (only equality clauses use the index), `stats` reports `docs_estimate`
+Cold collections also take **ordered (range) indexes** —
+`grange index --coll events --field ts --range` — which store the field's values
+sorted across pages with a min/max boundary file per run, so a range query reads
+only the pages whose interval overlaps it (`mode:"cold-range"`). Ordered by a
+real workload: mirroring a live analytics database showed every dashboard
+question is a time range, and those were full scans.
+
+Trade-offs, enforced: no TTL docs on cold collections, `~=` clauses still scan, `stats` reports `docs_estimate`
 (an exact cold count streams every page), and gets go from ~µs to ~100 µs.
 Hot stays the default — cold is for data bigger than your RAM budget.
 
@@ -150,6 +156,24 @@ have — which is why the differential and crash suites below now cover cold.
 `follow` resyncs via `/export?format=lines` when behind, then applies watch
 deltas (puts + deletes), committing them to its own local WAL. `make crash`-grade
 durability applies to the replica too, because it IS a grange db.
+
+## A real workload
+
+`apps/vigie-sync` mirrors a live [vigie](https://vigie.intrane.fr) analytics
+database into grange — deliberately a **sidecar** that reads vigie's SQLite
+read-only, so a live product carries none of the risk of the experiment, and
+SQLite stays the source of truth and therefore the **oracle**:
+
+```sh
+vigie-sync sync    --sqlite /opt/vigie/vigie.db --token gt_...   # replay new rows
+vigie-sync compare --sqlite /opt/vigie/vigie.db --token gt_...   # every aggregate must match
+```
+
+`compare` checks totals, per-site and per-kind counts and a 24-hour window
+against SQLite: **14/14 match** on the live data. Dashboard-shaped queries on the
+mirror, measured on the host (604 events, cold, indexed): range window 29 ms,
+equality 25 ms, per-site aggregate 26 ms. The workload is what asked for cold
+range indexes — see above.
 
 ## How cold storage is verified
 

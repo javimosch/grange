@@ -185,6 +185,7 @@ func gr_index_add(f, sums, kind) (ok) {
         // in-memory buckets; compaction folds every run so lookups are ready
         ok = 0
         if cold_is_indexed(f) == 0 { g_cifields = append(g_cifields, f) }
+        g_cikind[f] = kind
         if cold_idx_save() == 0 { return }
         ok = cold_compact()
         return

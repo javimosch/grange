@@ -244,6 +244,7 @@ func gr_open(db, coll) (ok, errmsg) {
     g_run_fields = []string{}
     g_run_iparts = []int{}
     g_cifields = []string{}
+    g_cikind = make(map[string]string)
     mkdir(db)
     mkdir(gr_dir())
     entries := list_dir(gr_dir())

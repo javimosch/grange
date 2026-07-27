@@ -35,17 +35,31 @@ func cold_idx_name(rid, f, j) (s) {
 
 func cold_idx_save() (ok) {
     ok = 1
-    if write_file(gr_dir() + "/cold.idx", join(g_cifields, "\n") + "\n") < 0 { ok = 0 }
+    lines := []string{}
+    i := 0
+    while i < len(g_cifields) {
+        f := g_cifields[i]
+        ln := f
+        if len(g_cikind[f]) > 0 { ln = ln + "\t" + g_cikind[f] }
+        lines = append(lines, ln)
+        i = i + 1
+    }
+    if write_file(gr_dir() + "/cold.idx", join(lines, "\n") + "\n") < 0 { ok = 0 }
 }
 
 func cold_idx_load() {
     g_cifields = []string{}
+    g_cikind = make(map[string]string)
     content := read_file(gr_dir() + "/cold.idx")
     if len(content) == 0 { return }
     lines := split(content, "\n")
     i := 0
     while i < len(lines) {
-        if len(lines[i]) > 0 { g_cifields = append(g_cifields, lines[i]) }
+        if len(lines[i]) > 0 {
+            parts := split(lines[i], "\t")
+            g_cifields = append(g_cifields, parts[0])
+            if len(parts) > 1 { g_cikind[parts[0]] = parts[1] }
+        }
         i = i + 1
     }
 }
@@ -121,6 +135,11 @@ func cold_build_indexes(rid, pcount) (ok) {
     fi := 0
     while fi < len(g_cifields) {
         field := g_cifields[fi]
+        if cold_is_range(field) == 1 {
+            if cold_rng_from_pages(rid, pcount, field) == 0 { ok = 0  return }
+            fi = fi + 1
+            continue
+        }
         // phase 1: one pass over the data pages, writing each entry into the
         // scratch file of its value partition (so phase 2 reads it exactly once)
         k := 0
@@ -366,6 +385,21 @@ func q_cold_index(fields, ops, vals, limit, countonly) (items, n, used) {
     items = []string{}
     n = 0
     used = 0
+    // an ordered index answers the range clauses an equality index cannot
+    rfield, rop, rval, rok := cold_rng_usable(fields, ops, vals)
+    if rok == 1 {
+        used = 2
+        cands, pr := cold_rng_candidates(rfield, rop, rval)
+        if countonly == 1 {
+            arena {
+                xi, xn := cold_idx_resolve(cands, fields, ops, vals, 0, 1)
+                n = xn
+            }
+            return
+        }
+        items, n = cold_idx_resolve(cands, fields, ops, vals, limit, countonly)
+        return
+    }
     field, token, ok := cold_idx_usable(fields, ops, vals)
     if ok == 0 { return }
     used = 1

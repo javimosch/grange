@@ -29,6 +29,7 @@ var R_runpages = make(map[string][]int)
 var R_runcount = make(map[string][]int)
 var R_runfields = make(map[string][]string)
 var R_cifields = make(map[string][]string)
+var R_cikind = make(map[string]map[string]string)
 var R_runiparts = make(map[string][]int)
 
 func gr_key(db, coll) (k) {
@@ -63,6 +64,7 @@ func gr_park() {
     R_runfields[k] = g_run_fields
     R_runiparts[k] = g_run_iparts
     R_cifields[k] = g_cifields
+    R_cikind[k] = g_cikind
 }
 
 // gr_use switches the active collection, loading it from disk the first time.
@@ -117,6 +119,7 @@ func gr_evict() {
     delete(R_runfields, oldest)
     delete(R_runiparts, oldest)
     delete(R_cifields, oldest)
+    delete(R_cikind, oldest)
     delete(g_touch, oldest)
     write(2, "{\"event\":\"evicted\",\"key\":\"" + oldest + "\",\"loaded\":" + str(len(keys(R_loaded))) + "}\n")
 }
@@ -158,6 +161,7 @@ func gr_use(db, coll) (ok, errmsg) {
         g_run_fields = R_runfields[k]
         g_run_iparts = R_runiparts[k]
         g_cifields = R_cifields[k]
+        g_cikind = R_cikind[k]
         g_pend_ops = []string{}
         return
     }

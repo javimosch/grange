@@ -132,7 +132,11 @@ func cold_flush() (ok) {
     if gr_write_recfile(gr_dir() + "/" + cold_meta_name(rid), meta, 1) == 0 { ok = 0  return }
     fi := 0
     while fi < len(g_cifields) {
-        if cold_write_idx_pages(rid, g_cifields[fi], g_mem) == 0 { ok = 0  return }
+        if cold_is_range(g_cifields[fi]) == 1 {
+            if cold_rng_from_docs(rid, g_cifields[fi], g_mem) == 0 { ok = 0  return }
+        } else {
+            if cold_write_idx_pages(rid, g_cifields[fi], g_mem) == 0 { ok = 0  return }
+        }
         fi = fi + 1
     }
     g_run_rid = append(g_run_rid, rid)

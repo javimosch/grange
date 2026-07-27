@@ -146,7 +146,33 @@ func gr_verify(deep) (data, issues) {
             fields := split(g_run_fields[r], ",")
             fi := 0
             while fi < len(fields) {
-                if len(fields[fi]) > 0 {
+                if len(fields[fi]) > 0 && cold_is_range(fields[fi]) == 1 {
+                    // an ordered index is a boundary file plus its sorted pages:
+                    // every page the boundaries name must exist and verify
+                    mbody, mok := gr_load_recbody(gr_dir() + "/" + cold_rng_meta_name(rid, fields[fi]))
+                    if mok == 0 {
+                        items = vf_issue(items, cold_rng_meta_name(rid, fields[fi]), "range index boundary file missing or invalid for declared field " + fields[fi])
+                        issues = issues + 1
+                    } else {
+                        mpos := 0
+                        while true {
+                            kl, kn, km := gr_next_line(mbody, mpos)
+                            if km == 0 { break }
+                            mpos = kn
+                            if has_prefix(kl, "p|") {
+                                jl, jn, jm := gr_next_line(mbody, mpos)
+                                if jm == 0 { break }
+                                mpos = jn
+                                rk := parse_int(substr(kl, 2, len(kl)))
+                                rbody, rok2 := gr_load_recbody(gr_dir() + "/" + cold_rng_name(rid, fields[fi], rk))
+                                if rok2 == 0 {
+                                    items = vf_issue(items, cold_rng_name(rid, fields[fi], rk), "range index page missing or invalid")
+                                    issues = issues + 1
+                                }
+                            }
+                        }
+                    }
+                } else if len(fields[fi]) > 0 {
                     parts := g_run_iparts[r]
                     if parts < 1 { parts = cold_idx_parts() }
                     j := 0
