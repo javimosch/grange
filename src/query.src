@@ -184,7 +184,7 @@ func q_find(wh, limit) (data) {
         xitems, xn, xused := q_cold_index(fields, ops, vals, limit, 0)
         if xused > 0 {
             xmode := "cold-index"
-            if xused == 2 { xmode = "cold-range" }
+            if xused == 2 { xmode = "cold-index-multi" }
             data = "{\"count\":" + str(xn) + ",\"mode\":\"" + xmode + "\",\"items\":[" + join(xitems, ",") + "]}"
             return
         }
@@ -236,7 +236,7 @@ func q_count(wh) (data) {
         xitems, xn, xused := q_cold_index(fields, ops, vals, 0, 1)
         if xused > 0 {
             xmode := "cold-index"
-            if xused == 2 { xmode = "cold-range" }
+            if xused == 2 { xmode = "cold-index-multi" }
             data = "{\"count\":" + str(xn) + ",\"mode\":\"" + xmode + "\"}"
             return
         }

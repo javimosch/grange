@@ -267,38 +267,44 @@ func srv_handle(req) (res) {
     //   <id>\t{...}      put with id
     //   -\t<id>          delete
     if req.method == "POST" && (req.path == "/bulk" || has_prefix(req.path, "/bulk?")) {
-        lines := split(req.body, "\n")
-        // count real ops: an NDJSON body normally ends with a newline, and a
-        // trailing empty line must not push a full batch over the cap
+        // Counting and validation build a line slice and two trimmed copies per
+        // line — for a 10k-line batch that is ~6 kB retained per doc if it
+        // happens on the actor's arena. None of it outlives the check, so it
+        // runs in a scoped arena and only the verdict (two ints) comes out.
+        write(2, "{\"probe\":\"entry\",\"rss_kb\":" + str(bench_rss_kb()) + ",\"body_bytes\":" + str(len(req.body)) + "}\n")
         nlines := 0
-        li := 0
-        while li < len(lines) {
-            if len(trim(lines[li])) > 0 { nlines = nlines + 1 }
-            li = li + 1
+        badline := 0
+        arena {
+            lines := split(req.body, "\n")
+            li := 0
+            while li < len(lines) {
+                ln := trim(lines[li])
+                if len(ln) > 0 {
+                    nlines = nlines + 1
+                    if has_prefix(ln, "-\t") == false {
+                        tabp := index(ln, "\t")
+                        bdoc := ln
+                        bid := "x"
+                        if tabp > 0 {
+                            bid = substr(ln, 0, tabp)
+                            bdoc = substr(ln, tabp + 1, len(ln))
+                        }
+                        if valid_id(bid) == 0 || valid_doc(bdoc) == 0 {
+                            if badline == 0 { badline = li + 1 }
+                        }
+                    }
+                }
+                li = li + 1
+            }
+        }
+        write(2, "{\"probe\":\"after_validate\",\"rss_kb\":" + str(bench_rss_kb()) + "}\n")
+        if badline > 0 {
+            res = srv_err("400 Bad Request", "input", "bad op at line " + str(badline) + " (nothing applied)")
+            return
         }
         if nlines > 50000 {
             res = srv_err("400 Bad Request", "input", "max 50000 ops per bulk request (got " + str(nlines) + ")")
             return
-        }
-        // pass 1: validate everything — nothing stages until the batch is clean,
-        // so a bad line can never leak a partial batch into the next commit
-        i := 0
-        while i < len(lines) {
-            ln := trim(lines[i])
-            if len(ln) > 0 && has_prefix(ln, "-\t") == false {
-                tabp := index(ln, "\t")
-                bdoc := ln
-                bid := "x"
-                if tabp > 0 {
-                    bid = substr(ln, 0, tabp)
-                    bdoc = substr(ln, tabp + 1, len(ln))
-                }
-                if valid_id(bid) == 0 || valid_doc(bdoc) == 0 {
-                    res = srv_err("400 Bad Request", "input", "bad op at line " + str(i + 1) + " (nothing applied)")
-                    return
-                }
-            }
-            i = i + 1
         }
         // A large batch on a cold collection is written as its own run: the
         // memtable is flushed first (it shadows runs, so an older unflushed doc
@@ -310,15 +316,18 @@ func srv_handle(req) (res) {
                 res = srv_err("500 Internal Server Error", "internal", "flush before direct bulk failed")
                 return
             }
+            write(2, "{\"probe\":\"after_flush\",\"rss_kb\":" + str(bench_rss_kb()) + "}\n")
             rid := cold_next_rid()
             applied := 0
             arena { applied = escape(cold_bulk_direct(bytes(req.body), rid)) }
+            write(2, "{\"probe\":\"after_write\",\"rss_kb\":" + str(bench_rss_kb()) + "}\n")
             if applied < 0 {
                 res = srv_err("500 Internal Server Error", "internal", "direct bulk write failed")
                 return
             }
             cold_load_runs()
             if len(g_run_rid) > cold_max_runs() { gr_compact() }
+            write(2, "{\"probe\":\"after_loadruns\",\"rss_kb\":" + str(bench_rss_kb()) + "}\n")
             // watchers can't be handed 10k individual changes (the ring holds
             // 400): advance the sequence so anyone behind gets resync=1, which
             // is the designed fallback for "you are too far behind to patch"
@@ -326,10 +335,12 @@ func srv_handle(req) (res) {
             res = srv_ok("{\"ops\":" + str(applied) + ",\"mode\":\"direct-run\",\"ids\":[]}")
             return
         }
-        // pass 2: stage + single commit
+        // pass 2: stage + single commit (small batches only — large ones took
+        // the direct-run path above and returned)
+        lines := split(req.body, "\n")
         ids := []string{}
         nops := 0
-        i = 0
+        i := 0
         while i < len(lines) {
             ln := trim(lines[i])
             if len(ln) > 0 {
