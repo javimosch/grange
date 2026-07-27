@@ -129,10 +129,10 @@ func gr_count_lines(body) (n) {
     while pos < total {
         nl := bytes_index(body, g_nl, pos)
         if nl < 0 {
-            if total - pos > 1 { n = n + 1 }
+            if total - pos > 0 { n = n + 1 }
             return
         }
-        if nl - pos > 1 { n = n + 1 }
+        if nl - pos > 0 { n = n + 1 }
         pos = nl + 1
     }
 }

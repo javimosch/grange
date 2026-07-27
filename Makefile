@@ -20,6 +20,9 @@ bench: build
 	rm -rf /tmp/grange-bench
 	./$(BIN) bench --n 100000 --vs-sqlite
 
+routes: build
+	./scripts/routes_test.sh ./$(BIN)
+
 crash: build
 	./scripts/crash_test.sh ./$(BIN) 5
 	./scripts/crash_cold_test.sh ./$(BIN) 3
@@ -28,9 +31,9 @@ fuzz: build
 	./scripts/fuzz_cold.sh 1200 6
 	python3 scripts/fuzz_replica.py 150 3
 
-verify: check test bench crash fuzz
+verify: check test routes bench crash fuzz
 
 clean:
 	rm -f $(BIN) $(BIN).mfl
 
-.PHONY: build check test bench crash verify clean
+.PHONY: build check test routes bench crash verify clean

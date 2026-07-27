@@ -267,67 +267,38 @@ func srv_handle(req) (res) {
     //   <id>\t{...}      put with id
     //   -\t<id>          delete
     if req.method == "POST" && (req.path == "/bulk" || has_prefix(req.path, "/bulk?")) {
-        // Counting and validation build a line slice and two trimmed copies per
-        // line — for a 10k-line batch that is ~6 kB retained per doc if it
-        // happens on the actor's arena. None of it outlives the check, so it
-        // runs in a scoped arena and only the verdict (two ints) comes out.
-        write(2, "{\"probe\":\"entry\",\"rss_kb\":" + str(bench_rss_kb()) + ",\"body_bytes\":" + str(len(req.body)) + "}\n")
-        nlines := 0
-        badline := 0
-        arena {
-            lines := split(req.body, "\n")
-            li := 0
-            while li < len(lines) {
-                ln := trim(lines[li])
-                if len(ln) > 0 {
-                    nlines = nlines + 1
-                    if has_prefix(ln, "-\t") == false {
-                        tabp := index(ln, "\t")
-                        bdoc := ln
-                        bid := "x"
-                        if tabp > 0 {
-                            bid = substr(ln, 0, tabp)
-                            bdoc = substr(ln, tabp + 1, len(ln))
-                        }
-                        if valid_id(bid) == 0 || valid_doc(bdoc) == 0 {
-                            if badline == 0 { badline = li + 1 }
-                        }
-                    }
-                }
-                li = li + 1
-            }
-        }
-        write(2, "{\"probe\":\"after_validate\",\"rss_kb\":" + str(bench_rss_kb()) + "}\n")
-        if badline > 0 {
-            res = srv_err("400 Bad Request", "input", "bad op at line " + str(badline) + " (nothing applied)")
-            return
-        }
+        // Counting is index arithmetic over the body (no line is materialised).
+        nlines := gr_count_lines(bytes(req.body))
         if nlines > 50000 {
             res = srv_err("400 Bad Request", "input", "max 50000 ops per bulk request (got " + str(nlines) + ")")
             return
         }
         // A large batch on a cold collection is written as its own run: the
         // memtable is flushed first (it shadows runs, so an older unflushed doc
-        // would hide this newer batch), then the whole write happens inside an
-        // arena and the manifest state is re-read from disk. Ingest therefore
-        // retains nothing between requests.
+        // would hide this newer batch), the whole write happens inside an arena
+        // in passes over the body, and the manifest state is re-read from disk.
+        // Ingest therefore retains neither the batch nor a parsed copy of it.
+        // Records are validated as they are written — a run whose manifest was
+        // never written is invisible to recovery, so a bad line still applies
+        // nothing.
         if g_cold == 1 && nlines >= cold_bulk_threshold() {
             if cold_flush() == 0 {
                 res = srv_err("500 Internal Server Error", "internal", "flush before direct bulk failed")
                 return
             }
-            write(2, "{\"probe\":\"after_flush\",\"rss_kb\":" + str(bench_rss_kb()) + "}\n")
             rid := cold_next_rid()
             applied := 0
             arena { applied = escape(cold_bulk_direct(bytes(req.body), rid)) }
-            write(2, "{\"probe\":\"after_write\",\"rss_kb\":" + str(bench_rss_kb()) + "}\n")
             if applied < 0 {
+                if applied < 0 - 1 {
+                    res = srv_err("400 Bad Request", "input", "bad op at line " + str(0 - applied - 1) + " (nothing applied)")
+                    return
+                }
                 res = srv_err("500 Internal Server Error", "internal", "direct bulk write failed")
                 return
             }
             cold_load_runs()
             if len(g_run_rid) > cold_max_runs() { gr_compact() }
-            write(2, "{\"probe\":\"after_loadruns\",\"rss_kb\":" + str(bench_rss_kb()) + "}\n")
             // watchers can't be handed 10k individual changes (the ring holds
             // 400): advance the sequence so anyone behind gets resync=1, which
             // is the designed fallback for "you are too far behind to patch"
@@ -335,8 +306,37 @@ func srv_handle(req) (res) {
             res = srv_ok("{\"ops\":" + str(applied) + ",\"mode\":\"direct-run\",\"ids\":[]}")
             return
         }
-        // pass 2: stage + single commit (small batches only — large ones took
-        // the direct-run path above and returned)
+        // Small batches stage through the memtable, so they are validated first:
+        // nothing may be applied unless the whole batch is clean.
+        badline := 0
+        arena {
+            vbody := bytes(req.body)
+            vpos := 0
+            li := 0
+            while true {
+                ln, next, more := gr_next_line(vbody, vpos)
+                if more == 0 { break }
+                vpos = next
+                li = li + 1
+                t := trim(ln)
+                if len(t) > 0 && has_prefix(t, "-\t") == false {
+                    tabp := index(t, "\t")
+                    bdoc := t
+                    bid := "x"
+                    if tabp > 0 {
+                        bid = substr(t, 0, tabp)
+                        bdoc = substr(t, tabp + 1, len(t))
+                    }
+                    if valid_id(bid) == 0 || valid_doc(bdoc) == 0 {
+                        if badline == 0 { badline = li }
+                    }
+                }
+            }
+        }
+        if badline > 0 {
+            res = srv_err("400 Bad Request", "input", "bad op at line " + str(badline) + " (nothing applied)")
+            return
+        }
         lines := split(req.body, "\n")
         ids := []string{}
         nops := 0
@@ -370,7 +370,6 @@ func srv_handle(req) (res) {
         res = srv_ok("{\"ops\":" + str(nops) + ",\"ids\":[" + join(ids, ",") + "]}")
         return
     }
-    // long-poll: block (parked socket) until this collection changes past ?since=
     if req.method == "GET" && has_prefix(req.path, "/watch") {
         since := parse_int(query(req, "since"))
         tmo := parse_int(query(req, "timeout"))

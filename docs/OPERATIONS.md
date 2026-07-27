@@ -197,3 +197,60 @@ the whole cost (it is a third of it), and that machweb's quadratic body
 concatenation was responsible (fixed upstream anyway, and worth it for every
 machin web app, but it changed nothing here because curl delivers the body in a
 few large reads).
+
+## M29: the streaming write path — what it fixed and what it did not
+
+M28 ended by naming the fix: "a write path that never materialises a whole batch
+— processing a few partitions per pass over the body, trading passes for peak".
+M29 built exactly that, and the result is worth recording precisely, because
+half of it is a negative result.
+
+`cold_bulk_direct` now writes in passes. Each pass takes a slice of the page
+range, walks the body from the start, keeps only the records routing into that
+slice, writes those pages, and drops everything before the next pass. The pass
+width is chosen so a pass holds about `GRANGE_BULK_PASS` (default 5000) records
+regardless of batch size, and each pass runs inside its own `arena { }`.
+
+Validation moved INTO that walk. It used to be a separate full pass over the
+body (a second parse of every line, ~8-10 MB) whose only job was atomicity — and
+it was redundant: a run whose manifest was never written is invisible to
+recovery, so aborting mid-write applies nothing. The write path now validates
+each record as it routes it, and on a bad line removes the pages it wrote and
+returns `-(line+1)` before any manifest exists. Atomicity is unchanged and is
+tested directly: a 5000-line batch with one malformed line at 601 is rejected
+with `bad op at line 601 (nothing applied)`, the collection still counts 0, and
+`verify` reports intact.
+
+Measured, per 25k-record batch:
+
+| phase | M28 | M29 |
+|---|---|---|
+| validation pass | +10 MB | removed |
+| direct-run write | +15 MB | +2.2 MB |
+
+And the negative result: **process RSS for the full 200k ingest did not move**
+(222 MB vs M28's 218 MB, ~1.1 kB/doc). Two phases that together accounted for
+25 MB per batch now cost 2.2 MB, and the number at the end is the same.
+
+That is consistent with the M28 diagnosis rather than a contradiction of it: the
+high-water mark is set by heap FRAGMENTATION, not by any single phase's peak.
+Freed pages sit below live state (manifests, index state, the request buffer
+machweb allocates per connection), so `malloc_trim` cannot return them, and
+lowering a phase's peak does not lower a mark that a different allocation
+already set. Reaching a lower number needs an allocator-level change, not a
+grange-level one.
+
+Ship it anyway, for reasons that are not the RSS number: peak per pass is now
+bounded by `GRANGE_BULK_PASS` instead of by batch size, so a very large batch no
+longer scales its own transient cost; and the body is walked once instead of
+twice. What bounds ingest in production is still the SDK's 10k chunking plus the
+RSS watchdog.
+
+## Route inventory (scripts/routes_test.sh)
+
+Added after an edit to `serve.src` silently deleted the `/watch` route. All six
+unit suites passed with it gone — nothing unit-tests the HTTP surface — and the
+only thing that caught it was the replication fuzz's remote step, which failed
+as "primary unreachable" and looked like a network problem. `make routes` starts
+a server and asserts every published route answers something other than "no such
+route". It is in `make verify`.

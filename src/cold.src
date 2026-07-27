@@ -396,45 +396,107 @@ func cold_count_est() (n) {
 // The caller MUST flush the memtable first: the memtable shadows runs, so an
 // older unflushed doc would otherwise hide this newer batch. Returns ops applied
 // (-1 on a write failure).
+// cold_bulk_pass_lines: how many records one pass may hold in memory. The
+// batch is walked once per pass, so this trades CPU (re-parsing lines) for
+// peak memory — the whole point of the streaming path.
+func cold_bulk_pass_lines() (n) {
+    n = parse_int(env("GRANGE_BULK_PASS"))
+    if n == 0 { n = 5000 }
+}
+
+// cold_bulk_direct returns -1 on a write failure, or -(line+1) when a record is
+// malformed: the caller reports the line and NO manifest is written, so the
+// partial pages are invisible to recovery (and removed here anyway).
 func cold_bulk_direct(body, rid) (nops) {
     nops = 0
     est := gr_count_lines(body)
     if est == 0 { return }
     pcount := cold_pow2_pages(est)
-    // ONE pass over the batch, routing each record to its page's accumulator.
-    // (Walking the body once per page cost 32 copies of a 10k-doc batch and put
-    // the RSS peak at ~170 MB — the very thing this path exists to avoid.)
-    parts := make(map[int][]string)
-    cnt := make(map[int]int)
-    pos := 0
-    while true {
-        ln, next, more := gr_next_line(body, pos)
-        if more == 0 { break }
-        pos = next
-        t := trim(ln)
-        if len(t) > 0 {
-            if has_prefix(t, "-\t") {
-                id := substr(t, 2, len(t))
-                k := cold_hash(id) & (pcount - 1)
-                parts[k] = append(parts[k], "d|" + id)
-                cnt[k] = cnt[k] + 1
-            } else {
-                tabp := index(t, "\t")
-                if tabp > 0 {
-                    id := substr(t, 0, tabp)
-                    k := cold_hash(id) & (pcount - 1)
-                    parts[k] = append(parts[k], "p|" + id)
-                    parts[k] = append(parts[k], substr(t, tabp + 1, len(t)))
-                    cnt[k] = cnt[k] + 1
+    // Passes over the body, each writing a slice of the pages. Holding every
+    // record first (one map of the whole batch) cost ~10x the body in retained
+    // arena memory — measured at ~15 MB for a 1.5 MB batch, which a long-lived
+    // actor cannot give back once live state lands above it. Each pass now
+    // holds at most cold_bulk_pass_lines() records and is scoped, so peak memory
+    // is a constant we choose rather than the size of whatever the client sent.
+    per := cold_bulk_pass_lines()
+    ppp := pcount
+    if est > per {
+        ppp = pcount * per / est
+        if ppp < 1 { ppp = 1 }
+    }
+    base := 0
+    failed := 0
+    badat := 0
+    while base < pcount {
+        hi := base + ppp
+        if hi > pcount { hi = pcount }
+        written := 0
+        arena {
+            parts := make(map[int][]string)
+            cnt := make(map[int]int)
+            pos := 0
+            lineno := 0
+            while true {
+                ln, next, more := gr_next_line(body, pos)
+                if more == 0 { break }
+                pos = next
+                lineno = lineno + 1
+                t := trim(ln)
+                if len(t) > 0 {
+                    if has_prefix(t, "-\t") {
+                        id := substr(t, 2, len(t))
+                        k := cold_hash(id) & (pcount - 1)
+                        if k >= base && k < hi {
+                            parts[k] = append(parts[k], "d|" + id)
+                            cnt[k] = cnt[k] + 1
+                        }
+                    } else {
+                        tabp := index(t, "\t")
+                        if tabp > 0 {
+                            id := substr(t, 0, tabp)
+                            doc := substr(t, tabp + 1, len(t))
+                            // validate as we go: a separate pre-pass cost ~10 MB
+                            // on a 25k-line batch and bought nothing, because a
+                            // run without its manifest is already invisible
+                            if valid_id(id) == 0 || valid_doc(doc) == 0 {
+                                if badat == 0 { badat = lineno }
+                            } else {
+                                k := cold_hash(id) & (pcount - 1)
+                                if k >= base && k < hi {
+                                    parts[k] = append(parts[k], "p|" + id)
+                                    parts[k] = append(parts[k], doc)
+                                    cnt[k] = cnt[k] + 1
+                                }
+                            }
+                        } else {
+                            if badat == 0 { badat = lineno }
+                        }
+                    }
+                }
+            }
+            if badat == 0 {
+                k := base
+                while k < hi {
+                    if gr_write_recfile(gr_dir() + "/" + cold_page_name(rid, k), parts[k], cnt[k]) == 0 { failed = 1 }
+                    written = written + cnt[k]
+                    k = k + 1
                 }
             }
         }
-    }
-    k := 0
-    while k < pcount {
-        if gr_write_recfile(gr_dir() + "/" + cold_page_name(rid, k), parts[k], cnt[k]) == 0 { nops = -1  return }
-        nops = nops + cnt[k]
-        k = k + 1
+        if badat > 0 {
+            // drop the pages written before the bad record was reached: without
+            // a manifest they are already ignored, this just avoids litter
+            k2 := 0
+            while k2 < pcount {
+                remove(gr_dir() + "/" + cold_page_name(rid, k2))
+                k2 = k2 + 1
+            }
+            nops = 0 - badat - 1
+            return
+        }
+        if failed == 1 { nops = -1  return }
+        nops = nops + written
+        base = hi
     }
     meta := []string{}
     meta = append(meta, "p|meta")
