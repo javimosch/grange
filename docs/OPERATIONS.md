@@ -168,3 +168,32 @@ Two corrections to the record, both from this measurement:
 Automatic compaction (`GRANGE_MAX_RUNS`, default 8) was measured separately and
 is not part of this cost: with it disabled the ingest curve is identical, and a
 full compaction of 400k docs adds ~1 MB.
+
+## Why ingest still costs ~1.1 kB/doc (M28 investigation)
+
+Instrumenting the bulk handler per phase (25k-line batch, 1.5 MB body):
+
+| phase | RSS delta |
+|---|---|
+| validation (split + two trims per line) | +8 MB |
+| direct-run write (partition map, page joins) | +15 MB |
+| manifest reload | 0 |
+
+Both blocks are arena-scoped and both reclaim correctly — but RSS does not come
+back, because glibc keeps freed pages on its heap free-list and grange allocates
+*live* state (run manifests, index state) after each batch, so the freed pages
+sit BELOW live data. `malloc_trim` can only release the free top of the heap, so
+the scoped-arena trim added in machin #535 helps a process with little live
+state (measured flat there) and much less here.
+
+What actually bounds this today: the SDKs chunk at 10k lines, and the RSS
+watchdog restarts safely (every batch is all-or-nothing, and the cursor and data
+are on disk). The real fix is a write path that never materialises a whole batch
+— processing a few partitions per pass over the body, trading passes for peak —
+which is a milestone of its own, not a footnote to this one.
+
+Two hypotheses this investigation killed, in order: that the validation pass was
+the whole cost (it is a third of it), and that machweb's quadratic body
+concatenation was responsible (fixed upstream anyway, and worth it for every
+machin web app, but it changed nothing here because curl delivers the body in a
+few large reads).
