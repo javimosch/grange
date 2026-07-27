@@ -188,16 +188,28 @@ func cmd_stats(fs) {
 }
 
 // torture: crash-test writer — puts docs in small commits until killed.
+// --cold converts the collection first, so the kill lands in cold's multi-file
+// paths (page writes, manifest, compaction) rather than only the hot WAL.
 func cmd_torture(fs) {
     do_open(fs)
+    if flag_on(fs, "cold") {
+        cok, cerr := gr_cold_enable()
+        if cok == 0 { emit_err(83, "input", "cold enable failed: " + cerr, 1, "see message") }
+    }
     n := flag_int_val(fs, "n")
     batch := flag_int_val(fs, "batch")
     if batch < 1 { batch = 100 }
     i := 0
     while i < n {
-        gr_put("t" + str(i), "{\"i\":" + str(i) + "}")
+        gr_put("t" + str(i), "{\"i\":" + str(i) + ",\"grp\":\"g" + str(i % 7) + "\"}")
         if (i + 1) % batch == 0 {
             if gr_commit() == 0 { emit_err(111, "internal", "wal write failed", 0, "disk") }
+            // exercise the cold paths a crash must survive: flush every 4th
+            // batch, compact every 20th
+            if g_cold == 1 {
+                if (i + 1) % (batch * 4) == 0 { cold_flush() }
+                if (i + 1) % (batch * 20) == 0 { gr_compact() }
+            }
         }
         i = i + 1
     }
@@ -239,6 +251,7 @@ func main() {
     fs = flag_str(fs, "sum", "u", "", "agg: comma-separated numeric fields to sum/avg")
     fs = flag_str(fs, "minmax", "m", "", "agg: comma-separated numeric fields to min/max (scan path)")
     fs = flag_bool(fs, "range", "R", "index: also keep a sorted projection for > < >= <= queries")
+    fs = flag_bool(fs, "cold", "C", "torture: convert the collection to cold first (crash-test the page/manifest paths)")
     fs = parse_flags(fs, args())
     rest := flag_args(fs)
     if len(rest) == 0 {

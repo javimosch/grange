@@ -1,0 +1,164 @@
+// differential test: a COLD collection must be observationally identical to a
+// HOT one. Hot is the oracle (simple, long-proven: one memtable, one WAL);
+// cold is the young code (page files, cross-run shadowing, tombstones,
+// compaction, index staleness). The same pseudo-random op stream is applied to
+// both and every observable — count, get, filtered count, find, agg — is
+// compared after EVERY op, so a divergence names the op that caused it.
+//
+// The stream deliberately interleaves the operations that make cold hard:
+// flushes (memtable -> a new run), compactions (fold every run), and index
+// declarations mid-stream (so index pages must be rebuilt over existing data
+// and re-verified against newer runs).
+//
+// GRANGE_DIFF_OPS tunes the op count (default 300; scripts/fuzz_cold.sh runs
+// far more). The PRNG is a seeded LCG so a failure is reproducible.
+
+var d_seed = 20260727
+var d_db = ""
+var d_fail = 0
+
+func d_rand(n) (v) {
+    d_seed = (d_seed * 1103515245 + 12345) % 2147483648
+    v = d_seed % n
+    if v < 0 { v = 0 - v }
+}
+
+func d_ops() (n) {
+    n = parse_int(env("GRANGE_DIFF_OPS"))
+    if n == 0 { n = 300 }
+}
+
+func d_seed_env() {
+    s := parse_int(env("GRANGE_DIFF_SEED"))
+    if s > 0 { d_seed = s }
+}
+
+func d_doc(i) (doc) {
+    doc = "{\"grp\":\"g" + str(i % 5) + "\",\"v\":" + str(i) + ",\"tag\":\"t" + str(i % 13) + "\"}"
+}
+
+// d_apply runs one op against whichever collection is currently open.
+// op 0-5 put · 6-7 delete · 8 flush (cold only) · 9 compact
+func d_apply(op, key, i, cold) {
+    if op <= 5 {
+        gr_put("k" + str(key), d_doc(i))
+        gr_commit()
+        return
+    }
+    if op <= 7 {
+        gr_del("k" + str(key))
+        gr_commit()
+        return
+    }
+    if op == 8 {
+        if cold == 1 { cold_flush() }
+        return
+    }
+    gr_compact()
+}
+
+func d_cmp_int(got, want, what, step) {
+    if got != want {
+        if d_fail < 5 {
+            println("DIVERGENCE at step " + str(step) + " [" + what + "]: cold=" + str(got) + " hot=" + str(want))
+        }
+        d_fail = d_fail + 1
+    }
+}
+
+func d_cmp_str(got, want, what, step) {
+    if got != want {
+        if d_fail < 5 {
+            println("DIVERGENCE at step " + str(step) + " [" + what + "]: cold=" + got + " hot=" + want)
+        }
+        d_fail = d_fail + 1
+    }
+}
+
+// d_observe collects every observable of the open collection as one string: the
+// FULL visible state (every key in the space, read through gr_get) plus counts
+// and three query shapes. Probing a single random key was not enough — mutation
+// testing showed a broken run-tombstone path surviving, because only gr_get
+// consults it and one probe per step rarely lands on a resurrected key.
+func d_observe(probe) (obs) {
+    state := ""
+    ki := 0
+    while ki < 40 {
+        kdoc, kfound := gr_get("k" + str(ki))
+        if kfound == 1 { state = state + "k" + str(ki) + "=" + kdoc + ";" }
+        ki = ki + 1
+    }
+    doc, found := gr_get("k" + str(probe))
+    cj := q_count("grp=g2")
+    cv, cerr := json_get(cj, ".count")
+    rj := q_count("v>=50")
+    rv, rerr := json_get(rj, ".count")
+    tj := q_count("tag=t7")
+    tv, terr := json_get(tj, ".count")
+    fj := q_find("grp=g1", 0)
+    fv, ferr := json_get(fj, ".count")
+    obs = str(gr_count()) + "|" + str(found) + ":" + doc + "|" + cv + "|" + rv + "|" + tv + "|" + fv + "|" + state
+}
+
+func main() {
+    d_seed_env()
+    d_db = "/tmp/grange-diff-" + str(now_ms())
+    nops := d_ops()
+
+    ok, errmsg := gr_open(d_db, "hot")
+    ok, errmsg = gr_open(d_db, "cold")
+    cok, cerr := gr_cold_enable()
+    assert_eq_int(cok, 1, "cold enable")
+
+    indexed := 0
+    step := 0
+    while step < nops {
+        op := d_rand(10)
+        key := d_rand(40)
+        val := d_rand(100)
+        probe := d_rand(40)
+
+        ok, errmsg = gr_use(d_db, "hot")
+        d_apply(op, key, val, 0)
+        hot_obs := d_observe(probe)
+
+        ok, errmsg = gr_use(d_db, "cold")
+        d_apply(op, key, val, 1)
+        cold_obs := d_observe(probe)
+
+        d_cmp_str(cold_obs, hot_obs, "observables", step)
+
+        // declare indexes a third of the way in: index pages must be built over
+        // existing data and stay exact as newer runs shadow older entries
+        if indexed == 0 && step == nops / 3 {
+            ok, errmsg = gr_use(d_db, "hot")
+            gr_index_add("grp", "", "")
+            ok, errmsg = gr_use(d_db, "cold")
+            gr_index_add("grp", "", "")
+            gr_index_add("tag", "", "")
+            indexed = 1
+        }
+        step = step + 1
+    }
+
+    // a reopen must not change any answer on either side
+    ok, errmsg = gr_use(d_db, "hot")
+    hot_final := d_observe(7)
+    ok, errmsg = gr_use(d_db, "cold")
+    cold_final := d_observe(7)
+    d_cmp_str(cold_final, hot_final, "final", nops)
+
+    ok, errmsg = gr_open(d_db, "hot")
+    hot_reopened := d_observe(7)
+    ok, errmsg = gr_open(d_db, "cold")
+    cold_reopened := d_observe(7)
+    d_cmp_str(hot_reopened, hot_final, "hot survives reopen", nops)
+    d_cmp_str(cold_reopened, cold_final, "cold survives reopen", nops)
+
+    // and a final compaction must preserve every answer
+    assert_eq_int(gr_compact(), 1, "final cold compact")
+    d_cmp_str(d_observe(7), cold_final, "cold survives compaction", nops)
+
+    assert_eq_int(d_fail, 0, "cold matches hot across " + str(nops) + " random ops")
+    test_summary()
+}

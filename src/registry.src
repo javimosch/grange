@@ -290,6 +290,42 @@ func gr_reset() (ok) {
 func gr_refresh() (applied) {
     applied = 0
     entries := list_dir(gr_dir())
+    // A cold collection keeps its generation in crun-*.cmeta names, not seg-*,
+    // and a flush REPLACES the WAL chunks with a new run — which also restarts
+    // chunk numbering. A follower that only tracked chunks would therefore go
+    // silently stale (it kept answering from a memtable whose chunks no longer
+    // exist, and skipped the renumbered ones). Any change to the run set, a new
+    // generation, or a collection that has just been converted to cold means
+    // reopen instead of replay: for cold that is cheap (manifests + the current
+    // chunks), and it is the only correct read of the new layout.
+    if g_cold == 0 && len(read_file(gr_dir() + "/cold.flag")) > 0 {
+        rdb := g_db
+        rcoll := g_coll
+        rok, rerrmsg := gr_open(rdb, rcoll)
+        applied = -1
+        return
+    }
+    if g_cold == 1 {
+        cmaxgen := 0
+        cruns := 0
+        ci := 0
+        while ci < len(entries) {
+            ce := entries[ci]
+            if has_prefix(ce, "crun-") && has_suffix(ce, ".cmeta") {
+                cgv := parse_int(substr(ce, 5, 11))
+                if cgv > cmaxgen { cmaxgen = cgv }
+                if cgv == g_gen { cruns = cruns + 1 }
+            }
+            ci = ci + 1
+        }
+        if cmaxgen != g_gen || cruns != len(g_run_rid) {
+            rdb := g_db
+            rcoll := g_coll
+            rok, rerrmsg := gr_open(rdb, rcoll)
+            applied = -1
+            return
+        }
+    }
     maxgen := g_gen
     i := 0
     while i < len(entries) {

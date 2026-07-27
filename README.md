@@ -135,9 +135,36 @@ grange serve --db ./data --follow --port 4445   # local read-only follower: refr
 grange follow --from https://grange.intrane.fr --rtoken gt_... --db ./replica   # LIVE local replica of a hosted db over the /watch feed
 ```
 
+Cold collections replicate too: a flush replaces WAL chunks with a run (and
+restarts chunk numbering), so a follower detects any change to the run set or
+generation and reopens rather than replaying chunks it can no longer interpret.
+Before this it went **silently stale** — the failure mode a database must never
+have — which is why the differential and crash suites below now cover cold.
+
 `follow` resyncs via `/export?format=lines` when behind, then applies watch
 deltas (puts + deletes), committing them to its own local WAL. `make crash`-grade
 durability applies to the replica too, because it IS a grange db.
+
+## How cold storage is verified
+
+Cold mode is the youngest and most intricate code in the engine (cross-run
+shadowing, tombstones, compaction, index staleness), so it is tested against
+the simplest thing that cannot be wrong:
+
+- **Differential fuzz** (`make fuzz`) — the same pseudo-random op stream (puts,
+  overwrites, deletes, flushes, compactions, mid-stream index declarations) is
+  applied to a **hot collection as oracle** and a cold collection, comparing the
+  *entire visible state* plus counts, finds and aggregates after **every** op.
+  12,000 ops across 10 seeds, zero divergence.
+- **Mutation-tested harness** — the fuzzer itself was validated by injecting
+  four deliberate bugs (ignore run tombstones, skip the memtable in index
+  lookups, drop memtable docs during compaction, skip candidate verification).
+  The first version caught only three; the state comparison was strengthened
+  until all four fail loudly. A test that never fails proves nothing.
+- **Crash injection** (`make crash`) — `kill -9` mid-flight on cold collections,
+  where a commit spans many files (pages, then a manifest) and compaction
+  rewrites a whole generation. Recovery must open cleanly, agree with filtered
+  queries, accept writes, and survive a compaction of the recovered state.
 
 ## Build & verify
 

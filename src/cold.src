@@ -285,26 +285,34 @@ func cold_compact() (ok) {
     pagelines := make(map[string]string)
     k := 0
     while k < newp {
-        lines := []string{}
-        nrec := 0
-        // source groups whose hash-suffix folds into target page k
-        gsub := k
-        while gsub < grain {
-            g_gen = oldgen
-            grp := cold_group(gsub, grain)
-            g_gen = newgen
-            gids := keys(grp)
-            i := 0
-            while i < len(gids) {
-                lines = append(lines, "p|" + gids[i])
-                lines = append(lines, grp[gids[i]])
-                nrec = nrec + 1
-                i = i + 1
+        // arena: the source groups and the page's lines die with this iteration
+        // (the page is written inside the block), so a compaction of a large
+        // collection no longer piles every group map onto the actor's arena
+        pagerecs := 0
+        arena {
+            lines := []string{}
+            nrec := 0
+            // source groups whose hash-suffix folds into target page k
+            gsub := k
+            while gsub < grain {
+                g_gen = oldgen
+                grp := cold_group(gsub, grain)
+                g_gen = newgen
+                gids := keys(grp)
+                i := 0
+                while i < len(gids) {
+                    lines = append(lines, "p|" + gids[i])
+                    lines = append(lines, grp[gids[i]])
+                    nrec = nrec + 1
+                    i = i + 1
+                }
+                gsub = gsub + newp
             }
-            gsub = gsub + newp
+            if gr_write_recfile(gr_dir() + "/" + cold_page_name(1, k), lines, nrec) == 0 { nrec = 0 - 1 }
+            pagerecs = nrec
         }
-        if gr_write_recfile(gr_dir() + "/" + cold_page_name(1, k), lines, nrec) == 0 { g_gen = oldgen  return }
-        written = written + nrec
+        if pagerecs < 0 { g_gen = oldgen  return }
+        written = written + pagerecs
         k = k + 1
     }
     meta := []string{}

@@ -14,6 +14,7 @@ test:
 	@machin test framework/machweb.src src/engine.src src/registry.src src/cold.src src/coldindex.src src/index.src src/range.src src/query.src src/watch.src src/tenant.src src/serve.src tests/unit_index_test.src | tail -1
 	@machin test framework/machweb.src src/engine.src src/registry.src src/cold.src src/coldindex.src src/index.src src/range.src src/query.src src/watch.src src/tenant.src src/serve.src tests/unit_cold_test.src | tail -1
 	@machin test framework/machweb.src src/engine.src src/registry.src src/cold.src src/coldindex.src src/index.src src/range.src src/query.src src/watch.src src/tenant.src src/serve.src tests/unit_tenant_test.src | tail -1
+	@machin test framework/machweb.src src/engine.src src/registry.src src/cold.src src/coldindex.src src/index.src src/range.src src/query.src src/watch.src src/tenant.src src/serve.src tests/diff_cold_test.src | tail -1
 
 bench: build
 	rm -rf /tmp/grange-bench
@@ -21,8 +22,12 @@ bench: build
 
 crash: build
 	./scripts/crash_test.sh ./$(BIN) 5
+	./scripts/crash_cold_test.sh ./$(BIN) 3
 
-verify: check test bench crash
+fuzz: build
+	./scripts/fuzz_cold.sh 1200 6
+
+verify: check test bench crash fuzz
 
 clean:
 	rm -f $(BIN) $(BIN).mfl
