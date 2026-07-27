@@ -45,13 +45,47 @@ func gr_chk(body) (c) {
     c = substr(sha256(body), 0, 12)
 }
 
+// Durability. write_file returns once the data is in the page cache, so before
+// M30 a "committed" chunk could still be lost to a power cut or kernel panic —
+// the crash harnesses only ever proved PROCESS-crash safety (kill -9), which the
+// page cache survives on its own. fsync closes that gap.
+//
+// Two syncs are needed, and the second is the one people forget: fsync on the
+// file makes its CONTENT durable, but creating that file is a modification of
+// its DIRECTORY, so a fully-synced file can still vanish after a crash if the
+// directory entry never reached the disk. gr_write_recfile syncs content;
+// gr_sync_dir is called at the points that define a commit.
+//
+// GRANGE_FSYNC=0 turns both off for a throughput-over-durability workload (a
+// rebuildable mirror, a benchmark). The default is on: a database that loses an
+// acknowledged write on power loss is not crash-safe, whatever the README says.
+func gr_fsync_on() (yes) {
+    yes = 1
+    if env("GRANGE_FSYNC") == "0" { yes = 0 }
+}
+
+// gr_sync_dir makes recently created/removed directory entries durable. Call it
+// after the write that defines a commit — one sync covers every entry created
+// in that directory since the last one.
+func gr_sync_dir() (ok) {
+    ok = 1
+    if gr_fsync_on() == 0 { return }
+    if fsync(gr_dir()) < 0 { ok = 0 }
+}
+
 // gr_write_recfile writes lines + trailer to path. Returns 1 on success.
+// The file's content is made durable before returning, so a caller that writes
+// pages and then a manifest gets the ordering it depends on: the manifest can
+// only become durable after the pages it names already are.
 func gr_write_recfile(path, lines, nrecs) (ok) {
     ok = 0
     body := join(lines, "\n")
     full := body + "\n#|" + str(nrecs) + "|" + gr_chk(body) + "\n"
     if len(lines) == 0 { full = "#|0|" + gr_chk("") + "\n" }
     if write_file(path, full) < 0 { return }
+    if gr_fsync_on() == 1 {
+        if fsync(path) < 0 { return }
+    }
     ok = 1
 }
 
@@ -427,6 +461,10 @@ func gr_commit() (ok) {
     path := gr_dir() + "/wal-" + gr_pad6(g_gen) + "-" + gr_pad6(g_next_chunk) + ".grg"
     ok = gr_write_recfile(path, g_pend, g_pend_recs)
     if ok == 1 {
+        // this is THE commit point: the chunk's content is already durable, and
+        // syncing the directory makes the chunk's existence durable too. After
+        // this returns, the commit survives a power cut.
+        gr_sync_dir()
         g_next_chunk = g_next_chunk + 1
         if g_cold == 1 && len(keys(g_mem)) + len(keys(g_tomb)) >= cold_threshold() {
             cold_flush()

@@ -130,6 +130,10 @@ func cold_flush() (ok) {
     meta = append(meta, "p|meta")
     meta = append(meta, "{\"pages\":" + str(pcount) + ",\"count\":" + str(total) + ",\"fields\":\"" + join(g_cifields, ",") + "\",\"iparts\":" + str(cold_idx_parts()) + "}")
     if gr_write_recfile(gr_dir() + "/" + cold_meta_name(rid), meta, 1) == 0 { ok = 0  return }
+    // manifest-last: the pages are already durable (gr_write_recfile syncs
+    // content), and this makes the manifest that names them durable too. A crash
+    // before here leaves an unreferenced run, which recovery ignores.
+    gr_sync_dir()
     fi := 0
     while fi < len(g_cifields) {
         if cold_is_range(g_cifields[fi]) == 1 {
@@ -323,6 +327,7 @@ func cold_compact() (ok) {
     meta = append(meta, "p|meta")
     meta = append(meta, "{\"pages\":" + str(newp) + ",\"count\":" + str(written) + ",\"fields\":\"" + join(g_cifields, ",") + "\",\"iparts\":" + str(cold_idx_parts()) + "}")
     if gr_write_recfile(gr_dir() + "/" + cold_meta_name(1), meta, 1) == 0 { g_gen = oldgen  return }
+    gr_sync_dir()
     // new gen valid: drop every older artifact
     entries := list_dir(gr_dir())
     keepmeta := cold_meta_name(1)
@@ -507,6 +512,7 @@ func cold_bulk_direct(body, rid) (nops) {
         if cold_build_indexes(rid, pcount) == 0 { nops = -1  return }
     }
     if gr_write_recfile(gr_dir() + "/" + cold_meta_name(rid), meta, 1) == 0 { nops = -1  return }
+    gr_sync_dir()
 }
 
 // cold_next_rid is the rid a new run may claim in the current generation.

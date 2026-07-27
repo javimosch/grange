@@ -23,6 +23,9 @@ bench: build
 routes: build
 	./scripts/routes_test.sh ./$(BIN)
 
+durability: build
+	./scripts/durability_test.sh ./$(BIN)
+
 crash: build
 	./scripts/crash_test.sh ./$(BIN) 5
 	./scripts/crash_cold_test.sh ./$(BIN) 3
@@ -31,9 +34,9 @@ fuzz: build
 	./scripts/fuzz_cold.sh 1200 6
 	python3 scripts/fuzz_replica.py 150 3
 
-verify: check test routes bench crash fuzz
+verify: check test routes durability bench crash fuzz
 
 clean:
 	rm -f $(BIN) $(BIN).mfl
 
-.PHONY: build check test routes bench crash verify clean
+.PHONY: build check test routes durability bench crash verify clean

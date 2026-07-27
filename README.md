@@ -229,7 +229,14 @@ make verify   # check + tests (69) + 100k bench + crash harness
   engine milestone.
 - Hot collections keep the whole dataset + indexes in memory (memtable = the db); segments make cold open fast, not memory small. Steady-state RSS at 100k docs + 1 index is ~120 MB (fresh process); the bench process peaks at ~440 MB from MFL arena temporaries — a memory diet is the standing target.
 - `--where` supports equality + numeric ranges. Equality clauses use buckets; a single range clause on a `--range` field uses the sorted projection (built lazily on the first range query after a write — the build cost is the first query's, honestly). Multi-clause range queries scan. Aggregate registers cover count/sum/avg; `--minmax` computes min/max on the scan path.
-- Durability is process-crash-exact (proven by `make crash`), OS-crash best-effort (no fsync builtin in MFL yet).
+- Durability: a commit is fsynced before it is acknowledged — the chunk's content, then the
+  directory entry that makes it exist (`make durability` asserts both at the syscall level, and
+  that a cold flush syncs every page before the manifest naming it). Process-crash-exact is
+  proven by `make crash`. Cost: ~1.9 ms per commit, so ~31% on single-document commits and
+  nothing measurable on batched writes (10k docs is one commit). `GRANGE_FSYNC=0` opts out for
+  rebuildable data. Not proven, and not provable here: that the DEVICE honours fsync — drives
+  with volatile write caches can lie, which is a hardware property, not a grange one.
+  (This needed an `fsync` builtin in MFL, which did not exist; added upstream in machin.)
 - `grange serve` handles one request at a time (correctness first) across any number of collections and tenants. Metering charges storage only (no per-query fees yet); billing sweeps piggyback on requests every 6h. Concurrent readers are next.
 
 MIT.

@@ -254,3 +254,61 @@ only thing that caught it was the replication fuzz's remote step, which failed
 as "primary unreachable" and looked like a network problem. `make routes` starts
 a server and asserts every published route answers something other than "no such
 route". It is in `make verify`.
+
+## M30: durability — what "committed" now means
+
+Until M30, grange's crash-safety claim covered exactly one failure mode. `make
+crash` kills a writer with `kill -9` and proves the database opens clean and
+holds a committed prefix — but a `kill -9` leaves the page cache intact, and the
+kernel writes it out afterwards. Nothing in grange called `fsync`, so a power
+cut or a kernel panic could lose or tear a commit that had already been
+acknowledged. The README said so; it was still the largest honesty gap left in a
+product whose first claim is crash safety.
+
+MFL had no `fsync` builtin, so the fix started upstream (machin #536). It takes
+a path and syncs a file *or a directory*, because both are needed:
+
+  · `fsync(file)` makes the CONTENT durable
+  · `fsync(dir)` makes the file's EXISTENCE durable — creating a file is a
+    directory modification, and a fully-synced file can still vanish after a
+    crash if its directory entry never reached the disk
+
+grange applies that at two levels. `gr_write_recfile` — the chokepoint every
+chunk, page, manifest and index page passes through — syncs content before
+returning. The directory is synced at the points that DEFINE a commit: after the
+WAL chunk in `gr_commit`, and after each manifest write on the cold paths. One
+directory sync covers every entry created since the last one.
+
+This also gives the manifest-last discipline real teeth. It was previously an
+ordering of `write()` calls, which the kernel is free to reorder on the way to
+the platter; now the pages are fsynced before the manifest that names them is,
+so a crash can leave an unreferenced run (invisible to recovery) but never a
+manifest pointing at pages that do not exist.
+
+### Cost, measured
+
+| workload | GRANGE_FSYNC=1 | GRANGE_FSYNC=0 |
+|---|---|---|
+| 200 single-document commits | 1208 ms (165/s) | 834 ms (239/s) |
+| one 10k-document bulk | 21 ms | 23 ms |
+
+About 1.9 ms per commit (two fsyncs), so ~31% on per-document commits and
+nothing measurable on batched writes — 10k documents are one commit, so the cost
+amortises to ~0.0002 ms/doc. That shape is why the default is ON: the way grange
+is actually used at scale (bulk ingest through the SDKs) pays nothing for
+durability. `GRANGE_FSYNC=0` remains for rebuildable data — a mirror that can be
+re-synced from its source, or a benchmark.
+
+### What is proven, and what is not
+
+`make durability` asserts the discipline at the SYSCALL level, because fsync is
+invisible to behavioural tests — a build that silently dropped it would pass the
+entire rest of the gate. It traces the real calls and checks that a commit
+fsyncs its chunk and then its directory, that a cold flush fsyncs every page
+before the manifest, and that `GRANGE_FSYNC=0` issues none (which doubles as the
+harness's own negative control).
+
+NOT proven: that the storage DEVICE honours fsync. Drives with volatile write
+caches can acknowledge a sync that is still in flight. That is a hardware
+property and no test on this box can establish it, so the README states it as a
+limit rather than implying otherwise.
