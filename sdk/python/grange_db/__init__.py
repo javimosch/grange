@@ -19,7 +19,7 @@ import urllib.parse as _up
 import urllib.error as _er
 
 __all__ = ["Grange", "GrangeError", "signup"]
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 
 class GrangeError(Exception):
@@ -115,9 +115,18 @@ class Grange:
     def del_many(self, ids):
         return self.bulk(["-\t" + i for i in ids])
 
-    def bulk(self, lines):
+    def bulk(self, lines, chunk=10000):
         """Raw bulk lines: '{...}' put auto-id · 'id\\t{...}' put · '-\\tid' del.
-        All-or-nothing, one WAL commit."""
+        All-or-nothing per chunk, one WAL commit each. Batches are chunked at
+        10k lines: server-side cost per batch grows superlinearly with size (a
+        25k-line batch retains ~5x more per doc than a 10k one)."""
+        if len(lines) > chunk:
+            ops, ids = 0, []
+            for i in range(0, len(lines), chunk):
+                d = self.bulk(lines[i:i + chunk], chunk)
+                ops += d["ops"]
+                ids.extend(d.get("ids", [])[:max(0, 100 - len(ids))])
+            return {"ops": ops, "ids": ids, "chunks": (len(lines) + chunk - 1) // chunk}
         return self._req("POST", f"/bulk?{self._qs}", raw_body="\n".join(lines), ctype="text/plain")
 
     def watch(self, since=0, timeout=25):

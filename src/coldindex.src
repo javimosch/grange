@@ -377,6 +377,41 @@ func cold_idx_resolve(cands, fields, ops, vals, limit, countonly) (items, n) {
     }
 }
 
+// cold_stable: exactly one run, nothing unflushed, no tombstones. In that state
+// every id appears exactly ONCE across the index, so an index entry cannot be
+// shadowed by a newer run or the memtable — which means a COUNT can be answered
+// from the index alone, with zero data-page reads. Any pending write or extra
+// run breaks the guarantee and the query falls back to resolving candidates.
+func cold_stable() (yes) {
+    yes = 0
+    if len(g_run_rid) != 1 { return }
+    if len(keys(g_mem)) > 0 { return }
+    if len(keys(g_tomb)) > 0 { return }
+    yes = 1
+}
+
+// cold_idx_count_only counts entries for `token` in the one run's index page.
+func cold_idx_count_only(field, token) (n) {
+    n = 0
+    pcount := g_run_iparts[0]
+    if pcount < 1 { pcount = cold_idx_parts() }
+    j := cold_hash(token) & (pcount - 1)
+    body, ok := gr_load_recbody(gr_dir() + "/" + cold_idx_name(g_run_rid[0], field, j))
+    if ok == 0 { n = 0 - 1  return }
+    pos := 0
+    while true {
+        ln, next, more := gr_next_line(body, pos)
+        if more == 0 { return }
+        pos = next
+        if has_prefix(ln, "p|") {
+            idl, inext, imore := gr_next_line(body, pos)
+            if imore == 0 { return }
+            pos = inext
+            if substr(ln, 2, len(ln)) == token { n = n + 1 }
+        }
+    }
+}
+
 // q_cold_index answers a cold query through an index page when one covers an
 // equality clause. Candidates are re-verified against the authoritative doc
 // (newer run / memtable / tombstone), so results are exact.
@@ -389,6 +424,15 @@ func q_cold_index(fields, ops, vals, limit, countonly) (items, n, used) {
     rfield, rop, rval, rok := cold_rng_usable(fields, ops, vals)
     if rok == 1 {
         used = 2
+        // index-only count: sound exactly when the collection is stable and the
+        // range clause is the whole query
+        if countonly == 1 && len(fields) == 1 && cold_stable() == 1 {
+            arena {
+                cands, pr := cold_rng_candidates(rfield, rop, rval)
+                n = len(cands)
+            }
+            return
+        }
         cands, pr := cold_rng_candidates(rfield, rop, rval)
         if countonly == 1 {
             arena {
@@ -403,6 +447,13 @@ func q_cold_index(fields, ops, vals, limit, countonly) (items, n, used) {
     field, token, ok := cold_idx_usable(fields, ops, vals)
     if ok == 0 { return }
     used = 1
+    if countonly == 1 && len(fields) == 1 && cold_stable() == 1 {
+        direct := cold_idx_count_only(field, token)
+        if direct >= 0 {
+            n = direct
+            return
+        }
+    }
     if countonly == 1 {
         // counting leaks nothing: candidates and pages die with the block
         arena {

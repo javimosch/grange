@@ -430,6 +430,7 @@ func gr_commit() (ok) {
         g_next_chunk = g_next_chunk + 1
         if g_cold == 1 && len(keys(g_mem)) + len(keys(g_tomb)) >= cold_threshold() {
             cold_flush()
+            if len(g_run_rid) > cold_max_runs() { gr_compact() }
         }
         // change feed: one seq per committed record, ring capped at ~400
         i := 0

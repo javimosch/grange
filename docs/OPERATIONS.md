@@ -141,3 +141,30 @@ If `compare` ever reports `match:false`, the mirror is wrong and grange is the
 suspect — read the `mismatches` array, then `grange verify` the collection. The
 sidecar never writes to vigie and never sits on its request path, so the live
 product cannot be harmed by this experiment.
+
+## Ingest memory scales with BATCH SIZE (M27 measurement)
+
+A bulk batch retains memory in the actor's arena roughly in proportion to the
+square of its size, not linearly with the documents in it:
+
+| batch size | retained per batch | per doc |
+|---|---|---|
+| 10k lines | ~6.5 MB | 0.65 kB |
+| 25k lines | ~35 MB | 1.4 kB |
+
+So 200k docs loaded in 25k-line batches leaves ~280 MB resident, which on the
+hosted 100 MB budget means the watchdog restarts mid-load (safe — every batch is
+all-or-nothing and the cursor/data are on disk — but disruptive). The clients now
+chunk at **10k lines** automatically, so a caller who writes `putMany` with a
+million rows gets the good behaviour without knowing any of this.
+
+Two corrections to the record, both from this measurement:
+- M24's "65 MB per 100k" was real but measured with 10k batches; it is not a
+  per-document constant, and a larger batch is disproportionately worse.
+- An intermediate reading of "4 MB per 100k" was my harness lying: the split
+  files it fed to curl did not exist, so it ingested nothing while printing an
+  assumed count. Print the OBSERVED count, never the intended one.
+
+Automatic compaction (`GRANGE_MAX_RUNS`, default 8) was measured separately and
+is not part of this cost: with it disabled the ingest curve is identical, and a
+full compaction of 400k docs adds ~1 MB.

@@ -195,6 +195,27 @@ func (c *Client) PutMany(docs []any) (*BulkResult, error) {
 // Bulk applies newline-delimited ops in one commit:
 // "{...}" put auto-id · "<id>\t{...}" put · "-\t<id>" delete.
 func (c *Client) Bulk(lines []string) (*BulkResult, error) {
+	// server-side cost per batch grows superlinearly with batch size, so chunk
+	// here instead of expecting callers to know that
+	const limit = 10000
+	if len(lines) > limit {
+		out := &BulkResult{}
+		for i := 0; i < len(lines); i += limit {
+			end := i + limit
+			if end > len(lines) {
+				end = len(lines)
+			}
+			r, err := c.Bulk(lines[i:end])
+			if err != nil {
+				return out, err
+			}
+			out.Ops += r.Ops
+			if len(out.IDs) < 100 {
+				out.IDs = append(out.IDs, r.IDs...)
+			}
+		}
+		return out, nil
+	}
 	body := bytes.NewReader([]byte(joinLines(lines)))
 	req, err := http.NewRequest("POST", c.Base+"/bulk?"+c.qs(), body)
 	if err != nil {

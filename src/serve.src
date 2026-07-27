@@ -318,6 +318,7 @@ func srv_handle(req) (res) {
                 return
             }
             cold_load_runs()
+            if len(g_run_rid) > cold_max_runs() { gr_compact() }
             // watchers can't be handed 10k individual changes (the ring holds
             // 400): advance the sequence so anyone behind gets resync=1, which
             // is the designed fallback for "you are too far behind to patch"

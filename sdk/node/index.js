@@ -97,7 +97,21 @@ class Grange {
 
   async delMany(ids) { return this.bulk(ids.map(id => `-\t${id}`)); }
 
+  // Server-side cost per batch grows superlinearly with batch size (a 25k-line
+  // batch retains ~5x more per doc than a 10k one), so chunk here rather than
+  // asking every caller to know that.
   async bulk(lines) {
+    const LIMIT = 10000;
+    if (lines.length > LIMIT) {
+      let ops = 0;
+      const ids = [];
+      for (let i = 0; i < lines.length; i += LIMIT) {
+        const d = await this.bulk(lines.slice(i, i + LIMIT));
+        ops += d.ops;
+        if (ids.length < 100 && d.ids) ids.push(...d.ids.slice(0, 100 - ids.length));
+      }
+      return { ops, ids, chunks: Math.ceil(lines.length / LIMIT) };
+    }
     const res = await fetch(`${this.url}/bulk?${this._qs}`, {
       method: 'POST',
       headers: { 'content-type': 'text/plain', authorization: `Bearer ${this.token}` },

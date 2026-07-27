@@ -362,6 +362,14 @@ func gr_cold_enable() (ok, errmsg) {
     ok = 1
 }
 
+// cold_max_runs bounds how many runs may accumulate before a compaction folds
+// them: every extra run is another page read on a miss, and the index-only
+// count path needs a single run to be sound.
+func cold_max_runs() (n) {
+    n = parse_int(env("GRANGE_MAX_RUNS"))
+    if n == 0 { n = 8 }
+}
+
 // cold threshold: flush after this many memtable records (default 2000)
 func cold_threshold() (n) {
     n = parse_int(env("GRANGE_COLD_MEMTABLE"))
