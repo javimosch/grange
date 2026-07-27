@@ -1,0 +1,98 @@
+// grange query cost — accounting first, then a budget.
+//
+// `grange serve` runs one request at a time on a single actor. That is a
+// deliberate correctness choice, but it means the cost of one query is paid by
+// everyone waiting behind it. Measured on a 100k-document cold collection: a
+// get that takes 0.2 ms on an idle server takes 85 ms while ONE unindexed scan
+// (82 ms) is running — a 425x degradation, and on the hosted instance it is
+// cross-tenant, so one tenant's scan stalls every other tenant.
+//
+// The drafted mailbox design in docs/CONCURRENCY.md does not fix this: it keeps
+// the actor at 1 and only parallelises request PARSING, while the 82 ms is
+// engine work. Real read concurrency needs separate processes over the same
+// directory (the `--follow` path, already proven by the replication fuzz).
+//
+// What this module does instead is bound the blast radius, in two steps:
+//
+//   1. ACCOUNTING, always on. Every query reports what it cost — documents
+//      examined and cold pages read — in its own response. A tenant cannot
+//      manage a cost it cannot see, and neither can we.
+//   2. A BUDGET, off by default. GRANGE_MAX_SCAN_DOCS / GRANGE_MAX_SCAN_PAGES
+//      abort a query that exceeds them, with an error that names the field to
+//      index. Self-hosted grange stays unlimited (it is one tenant's own
+//      machine); the hosted instance sets them, so a single query cannot hold
+//      the actor for an unbounded time.
+//
+// The counters are plain globals reset at the top of each query. That is safe
+// precisely because the engine is single-actor — the same property that causes
+// the problem makes measuring it exact.
+
+var g_qdocs = 0
+var g_qpages = 0
+var g_qover = 0
+
+func q_cost_reset() {
+    g_qdocs = 0
+    g_qpages = 0
+    g_qover = 0
+}
+
+// q_cost_docs/q_cost_page record work as it happens.
+func q_cost_docs(n) {
+    g_qdocs = g_qdocs + n
+}
+
+func q_cost_page() {
+    g_qpages = g_qpages + 1
+}
+
+func q_budget_docs() (n) {
+    n = parse_int(env("GRANGE_MAX_SCAN_DOCS"))
+}
+
+func q_budget_pages() (n) {
+    n = parse_int(env("GRANGE_MAX_SCAN_PAGES"))
+}
+
+// q_over_budget reports whether the current query has exceeded a configured
+// budget, and latches g_qover so the caller can turn it into an error. A budget
+// of 0 (the default) means unlimited.
+// q_over_limits is the decision itself, with the limits passed in: MFL has no
+// set_env, so keeping the policy pure is what makes it unit-testable at all —
+// and the env lookup belongs at the edge regardless.
+func q_over_limits(bd, bp) (yes) {
+    yes = 0
+    if bd > 0 && g_qdocs > bd { yes = 1 }
+    if bp > 0 && g_qpages > bp { yes = 1 }
+    if yes == 1 { g_qover = 1 }
+}
+
+func q_over_budget() (yes) {
+    yes = q_over_limits(q_budget_docs(), q_budget_pages())
+}
+
+func q_aborted() (yes) {
+    yes = g_qover
+}
+
+// q_cost_json is appended to every query response: the plan is already reported
+// as "mode", and this says what that plan actually cost.
+func q_cost_json() (s) {
+    s = ",\"scanned\":" + str(g_qdocs) + ",\"pages\":" + str(g_qpages)
+}
+
+// q_budget_msg explains the abort in terms of the fix, not the limit: an
+// unindexed scan is a missing index, and the caller can declare one.
+func q_budget_msg(fields) (s) {
+    s = "query exceeded the scan budget after " + str(g_qdocs) + " documents / " + str(g_qpages) + " pages"
+    if len(fields) > 0 {
+        s = s + " — declare an index on " + join(fields, " or ") + " to make it a lookup instead of a scan"
+    }
+}
+
+// srv_where_fields lists the fields a --where mentions, so the budget error can
+// name what to index rather than just reporting a number.
+func srv_where_fields(wh) (fields) {
+    f, ops, vals := wh_pairs(wh)
+    fields = f
+}

@@ -131,6 +131,10 @@ var g_nl = bytes("\n")
 func gr_load_recbody(path) (body, ok) {
     body = bytes("")
     ok = 0
+    // every page/chunk/index read in the engine passes through here, so this is
+    // where a query's page cost is counted — instrumenting call sites instead
+    // would miss whichever one gets added next
+    q_cost_page()
     // read as bytes: no string->bytes copy, and sha256_bytes verifies in place
     raw := read_file_bytes(path)
     n := len(raw)

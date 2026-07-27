@@ -107,6 +107,71 @@ func uq_validation() {
     assert_eq_int(valid_doc("{\"a\":\t1}"), 0, "tab doc invalid (index separator)")
 }
 
+
+// ---- query cost accounting + scan budget (M31) ----
+//
+// The counters are what a tenant is shown and what the budget acts on, so they
+// are worth testing directly rather than only through a server.
+
+func uq_cost_accounting() {
+    q_cost_reset()
+    assert_eq_int(g_qdocs, 0, "reset clears doc counter")
+    assert_eq_int(g_qpages, 0, "reset clears page counter")
+    assert_eq_int(q_aborted(), 0, "reset clears the abort latch")
+    q_cost_docs(10)
+    q_cost_docs(5)
+    q_cost_page()
+    assert_eq_int(g_qdocs, 15, "doc costs accumulate")
+    assert_eq_int(g_qpages, 1, "page costs accumulate")
+    // the cost is reported on every response so plans can be compared
+    assert_eq_str(q_cost_json(), ",\"scanned\":15,\"pages\":1", "cost json shape")
+}
+
+func uq_cost_budget() {
+    // budget 0 (the self-hosted default) never aborts, however much is read
+    q_cost_reset()
+    q_cost_docs(1000000)
+    assert_eq_int(q_over_limits(0, 0), 0, "unlimited budget does not abort")
+    assert_eq_int(q_aborted(), 0, "and does not latch")
+
+    q_cost_reset()
+    q_cost_docs(100)
+    assert_eq_int(q_over_limits(100, 0), 0, "exactly at the budget is allowed")
+    q_cost_docs(1)
+    assert_eq_int(q_over_limits(100, 0), 1, "one past the budget aborts")
+    assert_eq_int(q_aborted(), 1, "abort is latched for the caller to surface")
+
+    // the page budget is independent of the doc budget
+    q_cost_reset()
+    q_cost_page()
+    q_cost_page()
+    assert_eq_int(q_over_limits(0, 2), 0, "at the page budget is allowed")
+    q_cost_page()
+    assert_eq_int(q_over_limits(0, 2), 1, "past the page budget aborts")
+
+    // a huge doc count must not trip a page-only budget, and vice versa
+    q_cost_reset()
+    q_cost_docs(1000000)
+    assert_eq_int(q_over_limits(0, 5), 0, "docs do not trip a page budget")
+}
+
+func uq_budget_message() {
+    q_cost_reset()
+    q_cost_docs(500)
+    msg := q_budget_msg([]string{"kind"})
+    saw_count := 0
+    if index(msg, "500 documents") > 0 { saw_count = 1 }
+    assert_eq_int(saw_count, 1, "message reports what was read")
+    // an error that only says "too expensive" is useless; it must name the fix
+    saw_fix := 0
+    if index(msg, "declare an index on kind") > 0 { saw_fix = 1 }
+    assert_eq_int(saw_fix, 1, "message names the field to index")
+    msg = q_budget_msg([]string{})
+    saw_generic := 0
+    if index(msg, "scan budget") > 0 { saw_generic = 1 }
+    assert_eq_int(saw_generic, 1, "message survives an empty where")
+}
+
 func main() {
     uq_pairs_ops()
     uq_match_equality()
@@ -115,5 +180,8 @@ func main() {
     uq_match_conjunction()
     uq_escaping()
     uq_validation()
+    uq_cost_accounting()
+    uq_cost_budget()
+    uq_budget_message()
     test_summary()
 }

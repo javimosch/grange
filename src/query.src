@@ -148,12 +148,16 @@ func q_cold_scan(fields, ops, vals, limit, countonly) (items, n) {
     maxp := cold_maxp()
     k := 0
     while k < maxp {
+        // one page-group is the unit of work the budget can interrupt at: the
+        // group is already loaded, so stopping mid-group would waste the read
+        if q_over_budget() == 1 { return }
         if countonly == 1 {
             // nothing built here outlives the group, so the pages it read are
             // reclaimed at the end of the block (verified by ARENA001)
             arena {
                 grp := cold_group(k, maxp)
                 gids := keys(grp)
+                q_cost_docs(len(gids))
                 i := 0
                 while i < len(gids) {
                     if wh_match(grp[gids[i]], fields, ops, vals) == 1 { n = n + 1 }
@@ -163,6 +167,7 @@ func q_cold_scan(fields, ops, vals, limit, countonly) (items, n) {
         } else {
             grp := cold_group(k, maxp)
             gids := keys(grp)
+            q_cost_docs(len(gids))
             i := 0
             while i < len(gids) {
                 if limit > 0 && n >= limit { return }
@@ -178,6 +183,7 @@ func q_cold_scan(fields, ops, vals, limit, countonly) (items, n) {
 }
 
 func q_find(wh, limit) (data) {
+    q_cost_reset()
     gr_sweep_expired()
     fields, ops, vals := wh_pairs(wh)
     if g_cold == 1 {
@@ -185,11 +191,11 @@ func q_find(wh, limit) (data) {
         if xused > 0 {
             xmode := "cold-index"
             if xused == 2 { xmode = "cold-index-multi" }
-            data = "{\"count\":" + str(xn) + ",\"mode\":\"" + xmode + "\",\"items\":[" + join(xitems, ",") + "]}"
+            data = "{\"count\":" + str(xn) + ",\"mode\":\"" + xmode + "\"" + q_cost_json() + ",\"items\":[" + join(xitems, ",") + "]}"
             return
         }
         items, n := q_cold_scan(fields, ops, vals, limit, 0)
-        data = "{\"count\":" + str(n) + ",\"mode\":\"cold-scan\",\"items\":[" + join(items, ",") + "]}"
+        data = "{\"count\":" + str(n) + ",\"mode\":\"cold-scan\"" + q_cost_json() + ",\"items\":[" + join(items, ",") + "]}"
         return
     }
     // range fast path: walk only the sorted segment, no per-doc matching
@@ -206,7 +212,7 @@ func q_find(wh, limit) (data) {
             n = n + 1
             i = i + 1
         }
-        data = "{\"count\":" + str(n) + ",\"mode\":\"range\",\"items\":[" + join(items, ",") + "]}"
+        data = "{\"count\":" + str(n) + ",\"mode\":\"range\"" + q_cost_json() + ",\"items\":[" + join(items, ",") + "]}"
         return
     }
     ids, mode := wh_candidates(fields, ops, vals)
@@ -215,6 +221,8 @@ func q_find(wh, limit) (data) {
     i := 0
     while i < len(ids) {
         if limit > 0 && n >= limit { break }
+        q_cost_docs(1)
+        if q_over_budget() == 1 { break }
         doc := g_mem[ids[i]]
         if wh_match(doc, fields, ops, vals) == 1 {
             items = append(items, "{\"id\":\"" + jesc(ids[i]) + "\",\"doc\":" + doc + "}")
@@ -222,10 +230,11 @@ func q_find(wh, limit) (data) {
         }
         i = i + 1
     }
-    data = "{\"count\":" + str(n) + ",\"mode\":\"" + mode + "\",\"items\":[" + join(items, ",") + "]}"
+    data = "{\"count\":" + str(n) + ",\"mode\":\"" + mode + "\"" + q_cost_json() + ",\"items\":[" + join(items, ",") + "]}"
 }
 
 func q_count(wh) (data) {
+    q_cost_reset()
     gr_sweep_expired()
     fields, ops, vals := wh_pairs(wh)
     if len(fields) == 0 {
@@ -237,33 +246,35 @@ func q_count(wh) (data) {
         if xused > 0 {
             xmode := "cold-index"
             if xused == 2 { xmode = "cold-index-multi" }
-            data = "{\"count\":" + str(xn) + ",\"mode\":\"" + xmode + "\"}"
+            data = "{\"count\":" + str(xn) + ",\"mode\":\"" + xmode + "\"" + q_cost_json() + "}"
             return
         }
         items, n := q_cold_scan(fields, ops, vals, 0, 1)
-        data = "{\"count\":" + str(n) + ",\"mode\":\"cold-scan\"}"
+        data = "{\"count\":" + str(n) + ",\"mode\":\"cold-scan\"" + q_cost_json() + "}"
         return
     }
     // O(1) fast path: a single equality clause on an indexed field
     if len(fields) == 1 && ops[0] == "=" && ix_is_indexed(fields[0]) == 1 {
-        data = "{\"count\":" + str(g_bcount[ix_bucket(fields[0], vals[0])]) + ",\"mode\":\"indexed\"}"
+        data = "{\"count\":" + str(g_bcount[ix_bucket(fields[0], vals[0])]) + ",\"mode\":\"indexed\"" + q_cost_json() + "}"
         return
     }
     // range fast path: two binary searches
     if rb_usable(fields, ops) == 1 {
         rb_ensure(fields[0])
         lo, hi := rb_bounds(fields[0], ops[0], vals[0])
-        data = "{\"count\":" + str(hi - lo) + ",\"mode\":\"range\"}"
+        data = "{\"count\":" + str(hi - lo) + ",\"mode\":\"range\"" + q_cost_json() + "}"
         return
     }
     ids, mode := wh_candidates(fields, ops, vals)
     n := 0
     i := 0
     while i < len(ids) {
+        q_cost_docs(1)
+        if q_over_budget() == 1 { break }
         if wh_match(g_mem[ids[i]], fields, ops, vals) == 1 { n = n + 1 }
         i = i + 1
     }
-    data = "{\"count\":" + str(n) + ",\"mode\":\"" + mode + "\"}"
+    data = "{\"count\":" + str(n) + ",\"mode\":\"" + mode + "\"" + q_cost_json() + "}"
 }
 
 func agg_accum(doc, f, sf, mm, gcount, gsums, gmin, gmax) {

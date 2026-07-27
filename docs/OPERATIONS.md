@@ -312,3 +312,31 @@ NOT proven: that the storage DEVICE honours fsync. Drives with volatile write
 caches can acknowledge a sync that is still in flight. That is a hardware
 property and no test on this box can establish it, so the README states it as a
 limit rather than implying otherwise.
+
+## M31: query cost, and running the hosted instance with a budget
+
+Hosted grange should set a scan budget. Without one, any tenant can hold the
+single actor for as long as their largest collection takes to scan, and every
+other tenant's request queues behind it (measured: 0.2 ms -> 85 ms).
+
+    GRANGE_MAX_SCAN_DOCS=50000     # refuse a query after 50k documents examined
+    GRANGE_MAX_SCAN_PAGES=0        # 0 = no separate page limit
+
+Both default to 0 (unlimited), which is the right default for self-hosted
+grange — it is one tenant's own machine, and refusing their own query helps
+nobody. The hosted unit file sets them.
+
+Choosing a number: a budget is a latency bound, not a size bound. At roughly
+600k documents/second of scanning on dk1, 50k documents is ~80 ms of actor time,
+which is the longest another tenant should wait behind one request. Divide the
+tolerable queueing delay by that rate rather than picking a round number.
+
+Traceability, as with the fair-use caps: the cost is in every query response
+(`scanned`, `pages`) whether or not a budget is set, so a tenant can see which
+of their queries are scans before one is ever refused, and a refusal names the
+field to index rather than just reporting a limit.
+
+Note the interaction with cold storage: a cold collection's pages are read from
+disk, so `pages` counts real I/O; a hot collection's `pages` stays 0 and only
+`scanned` grows. A budget expressed in documents therefore behaves consistently
+across both, which is why `GRANGE_MAX_SCAN_DOCS` is the one to set.

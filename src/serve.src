@@ -259,6 +259,10 @@ func srv_handle(req) (res) {
         // only the body escapes, so the loop's arena stays flat (machin escape())
         body := ""
         arena { body = escape(q_find(wh, limit)) }
+        if q_aborted() == 1 {
+            res = srv_err("400 Bad Request", "input", q_budget_msg(srv_where_fields(wh)))
+            return
+        }
         res = srv_ok(body)
         return
     }
@@ -398,110 +402,9 @@ func srv_handle(req) (res) {
         res = srv_ok("")
         return
     }
-    if req.method == "GET" && has_prefix(req.path, "/export") {
-        if query(req, "format") == "lines" {
-            gr_sweep_expired()
-            lines := []string{}
-            if g_cold == 1 {
-                // a cold collection keeps most docs in run pages: exporting only
-                // the memtable made `grange follow` resync a PARTIAL dataset
-                maxp := cold_maxp()
-                pg := 0
-                while pg < maxp {
-                    grp := cold_group(pg, maxp)
-                    gids := keys(grp)
-                    gi := 0
-                    while gi < len(gids) {
-                        lines = append(lines, gids[gi] + "\t" + grp[gids[gi]])
-                        gi = gi + 1
-                    }
-                    pg = pg + 1
-                }
-            } else {
-                ids := keys(g_mem)
-                i := 0
-                while i < len(ids) {
-                    lines = append(lines, ids[i] + "\t" + g_mem[ids[i]])
-                    i = i + 1
-                }
-            }
-            res = response("200 OK", "text/plain", join(lines, "\n"))
-            return
-        }
-        wh := query(req, "where")
-        q_warm(wh)
-        body := ""
-        arena { body = escape(q_find(wh, 0)) }
-        res = srv_ok(body)
-        return
-    }
-    if req.method == "GET" && has_prefix(req.path, "/count") {
-        wh := query(req, "where")
-        q_warm(wh)
-        body := ""
-        arena { body = escape(q_count(wh)) }
-        res = srv_ok(body)
-        return
-    }
-    if req.method == "GET" && has_prefix(req.path, "/agg") {
-        f := query(req, "group-by")
-        if len(f) == 0 {
-            res = srv_err("400 Bad Request", "input", "missing group-by query param")
-            return
-        }
-        q_warm("")
-        sumspec := query(req, "sum")
-        mmspec := query(req, "minmax")
-        body := ""
-        arena { body = escape(q_agg_full(f, sumspec, mmspec)) }
-        res = srv_ok(body)
-        return
-    }
-    if req.method == "POST" && (req.path == "/index" || has_prefix(req.path, "/index?")) {
-        f := srv_body_str(req, "field")
-        if len(f) == 0 {
-            res = srv_err("400 Bad Request", "input", "body must be {\"field\":\"...\",\"sums\":\"a,b\"}")
-            return
-        }
-        if gr_index_add(f, srv_body_str(req, "sums"), srv_body_str(req, "kind")) == 0 {
-            res = srv_err("500 Internal Server Error", "internal", "could not persist index declaration")
-            return
-        }
-        res = srv_ok("{\"field\":\"" + jesc(f) + "\",\"docs_indexed\":" + str(gr_count()) + "}")
-        return
-    }
-    if req.method == "POST" && (req.path == "/cold" || has_prefix(req.path, "/cold?")) {
-        cok, cerr := gr_cold_enable()
-        if cok == 0 {
-            res = srv_err("400 Bad Request", "input", "cold enable failed: " + cerr)
-            return
-        }
-        res = srv_ok("{\"cold\":true,\"docs\":" + str(gr_count()) + "}")
-        return
-    }
-    if req.method == "POST" && (req.path == "/compact" || has_prefix(req.path, "/compact?")) {
-        if gr_compact() == 0 {
-            res = srv_err("500 Internal Server Error", "internal", "compaction failed; old files were NOT deleted")
-            return
-        }
-        res = srv_ok("{\"gen\":" + str(g_gen) + ",\"docs\":" + str(gr_count()) + "}")
-        return
-    }
-    if req.method == "GET" && has_prefix(req.path, "/verify") {
-        vdata, vissues := gr_verify(1)
-        if vissues > 0 {
-            res = srv_json("500 Internal Server Error", "{\"ok\":false,\"error\":{\"type\":\"corruption\",\"message\":\"" + str(vissues) + " integrity issue(s)\"},\"data\":" + vdata + "}")
-            return
-        }
-        res = srv_ok(vdata)
-        return
-    }
-    if req.method == "GET" && has_prefix(req.path, "/stats") {
-        if g_cold == 1 {
-            res = srv_ok("{\"coll\":\"" + jesc(g_coll) + "\",\"cold\":true,\"docs_estimate\":" + str(cold_count_est()) + ",\"runs\":" + str(len(g_run_rid)) + ",\"gen\":" + str(g_gen) + ",\"cold_indexes\":" + str(len(g_cifields)) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}")
-            return
-        }
-        res = srv_ok("{\"coll\":\"" + jesc(g_coll) + "\",\"docs\":" + str(gr_count()) + ",\"gen\":" + str(g_gen) + ",\"chunks_replayed\":" + str(g_replayed_chunks) + ",\"indexes\":" + str(len(g_ifields)) + "}")
+    rres, rhandled := srv_tail_routes(req)
+    if rhandled == 1 {
+        res = rres
         return
     }
     if req.method == "POST" && (req.path == "/shutdown" || has_prefix(req.path, "/shutdown?")) {

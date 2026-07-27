@@ -237,6 +237,16 @@ make verify   # check + tests (69) + 100k bench + crash harness
   rebuildable data. Not proven, and not provable here: that the DEVICE honours fsync — drives
   with volatile write caches can lie, which is a hardware property, not a grange one.
   (This needed an `fsync` builtin in MFL, which did not exist; added upstream in machin.)
-- `grange serve` handles one request at a time (correctness first) across any number of collections and tenants. Metering charges storage only (no per-query fees yet); billing sweeps piggyback on requests every 6h. Concurrent readers are next.
+- `grange serve` handles one request at a time (correctness first) across any number of collections
+  and tenants, so one expensive query is paid for by everyone behind it: measured, a 0.2 ms get
+  becomes 85 ms while a single unindexed scan runs, and on the hosted instance that is
+  cross-tenant. Every query response therefore reports its own cost (`scanned` documents,
+  `pages` read) beside its `mode`, and `GRANGE_MAX_SCAN_DOCS` / `GRANGE_MAX_SCAN_PAGES` bound it
+  — an over-budget query is refused with the field to index named, never silently truncated.
+  With a budget the innocent caller's p90 goes 79 ms -> 3 ms (`make isolation`). Unlimited by
+  default: self-hosted grange is one tenant's own machine. This bounds the blast radius; it does
+  not make reads concurrent — see [docs/CONCURRENCY.md](docs/CONCURRENCY.md), which also records
+  why the mailbox design drafted there would NOT have fixed the measured problem.
+- Metering charges storage only (no per-query fees); billing sweeps piggyback on requests every 6h.
 
 MIT.
