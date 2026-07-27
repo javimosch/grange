@@ -127,3 +127,17 @@ It checks checksums and record structure for every `.grg`/`.cmeta` file, that a
 cold manifest's count matches what its pages actually hold, that every field a
 run says it indexed has its index pages, and (deep mode) that a sample of index
 entries names ids the run really holds with the value the entry claims.
+
+## The vigie mirror (M25/M26)
+
+A read-only sidecar mirrors the live vigie analytics database into grange:
+
+- `vigie-sync.timer` — every 10 minutes, replays new SQLite rows into the
+  hosted tenant's cold `events` collection (cursor kept in grange itself).
+- `vigie-compare.timer` — daily, re-checks totals, per-site/per-kind counts and
+  a 24-hour window against SQLite, which stays the source of truth.
+
+If `compare` ever reports `match:false`, the mirror is wrong and grange is the
+suspect — read the `mismatches` array, then `grange verify` the collection. The
+sidecar never writes to vigie and never sits on its request path, so the live
+product cannot be harmed by this experiment.

@@ -170,9 +170,11 @@ vigie-sync compare --sqlite /opt/vigie/vigie.db --token gt_...   # every aggrega
 ```
 
 `compare` checks totals, per-site and per-kind counts and a 24-hour window
-against SQLite: **14/14 match** on the live data. Dashboard-shaped queries on the
-mirror, measured on the host (604 events, cold, indexed): range window 29 ms,
-equality 25 ms, per-site aggregate 26 ms. The workload is what asked for cold
+against SQLite: **14/14 match** on the live data. On dk1 it runs continuously —
+a systemd timer syncs every 10 minutes and a daily one re-checks against the
+oracle, so the mirror is a standing proof rather than a one-off demo. Dashboard-shaped queries on the
+mirror, measured on the host (604 events, cold, indexed): the 24-hour window —
+the query that was a full scan before the range index — answers in **3 ms**. The workload is what asked for cold
 range indexes — see above.
 
 ## How cold storage is verified
