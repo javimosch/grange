@@ -15,6 +15,12 @@ for r in $(seq 1 "$ROUNDS"); do
   sleep 0.$((RANDOM % 5 + 1))
   kill -9 "$W" 2>/dev/null
   wait "$W" 2>/dev/null
+  # a recovered database must be structurally intact, not merely answerable
+  if ! "$BIN" verify --db "$DB" --coll default >/dev/null 2>&1; then
+    echo "round $r: FAIL verify found corruption after recovery"
+    "$BIN" verify --db "$DB" --coll default 2>/dev/null | head -c 300; echo
+    fails=$((fails + 1)); rm -rf "$DB"; continue
+  fi
   OUT=$("$BIN" count --db "$DB" 2>&1)
   CODE=$?
   COUNT=$(echo "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["count"])' 2>/dev/null)

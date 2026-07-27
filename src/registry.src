@@ -187,6 +187,7 @@ func gr_apply_live(lines) (recs) {
                 ix_add(id, lines[i+1])
             }
             g_mem[id] = lines[i+1]
+            delete(g_tomb, id)
             gr_ttl_note(id, lines[i+1])
             g_seq = g_seq + 1
             g_chg = append(g_chg, "{\"seq\":" + str(g_seq) + ",\"op\":\"put\",\"id\":\"" + id + "\"}")
@@ -197,6 +198,12 @@ func gr_apply_live(lines) (recs) {
             if len(g_ifields) > 0 && has(g_mem, id) { ix_remove(id, g_mem[id]) }
             delete(g_mem, id)
             delete(g_ttl, id)
+            // a cold collection hides a run's copy behind a tombstone, so a
+            // REPLAYED delete must record one too: without this a follower kept
+            // serving a doc the primary had deleted, because deleting from the
+            // memtable is a no-op when the doc lives in a page (recovery via
+            // gr_apply_lines always did this; the incremental path predates cold)
+            if g_cold == 1 { g_tomb[id] = 1 }
             g_seq = g_seq + 1
             g_chg = append(g_chg, "{\"seq\":" + str(g_seq) + ",\"op\":\"del\",\"id\":\"" + id + "\"}")
             i = i + 1

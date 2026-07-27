@@ -16,6 +16,11 @@ for r in $(seq 1 "$ROUNDS"); do
   sleep 0.$((RANDOM % 6 + 2))
   kill -9 "$W" 2>/dev/null
   wait "$W" 2>/dev/null
+  if ! "$BIN" verify --db "$D" --coll c >/dev/null 2>&1; then
+    echo "round $r: FAIL verify found corruption after recovery"
+    "$BIN" verify --db "$D" --coll c 2>/dev/null | head -c 300; echo
+    fails=$((fails+1)); rm -rf "$D"; continue
+  fi
   OUT=$("$BIN" count --db "$D" --coll c 2>&1); CODE=$?
   COUNT=$(echo "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["count"])' 2>/dev/null)
   if [ "$CODE" -ne 0 ] || [ -z "$COUNT" ] || [ "$COUNT" -gt "$N" ]; then

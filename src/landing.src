@@ -36,6 +36,7 @@ func llms_txt() (t) {
         "COLD    curl -s -X POST \"$G/cold?coll=archive\" -H \"$A\"                          # DISK-RESIDENT mode: data lives in page files, not RAM; point gets read one page; scans stream; SECONDARY INDEXES supported (index --field, 15x faster selective lookups); no TTL on cold; irreversible per collection\n" +
         "WATCH   curl -s \"$G/watch?coll=jobs&since=0&timeout=25\" -H \"$A\"       # LONG-POLL: blocks until the collection changes past since -> {seq,changes:[{seq,op,id}]}; poll again with the returned seq\n" +
         "EXPORT  curl -s \"$G/export?coll=leads&format=lines\" -H \"$A\"              # NDJSON 'id<TAB>doc' lines — pipe straight into /bulk of another grange\n" +
+        "VERIFY  curl -s \"$G/verify?coll=leads\" -H \"$A\"                            # integrity check: every file's checksum + record stream, cold manifests vs their pages, declared indexes present and agreeing with the data -> {intact,files_checked,issues[]}\n" +
         "USAGE   curl -s $G/usage -H \"$A\"\n" +
         "HEALTH  curl -s $G/health                                                      # open, no auth\n\n" +
         "Docs are single-line minified JSON. Errors: {\"ok\":false,\"error\":{type,message}} with proper HTTP codes.\n\n" +

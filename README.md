@@ -161,6 +161,19 @@ the simplest thing that cannot be wrong:
   lookups, drop memtable docs during compaction, skip candidate verification).
   The first version caught only three; the state comparison was strengthened
   until all four fail loudly. A test that never fails proves nothing.
+- **Replication differential fuzz** (`make fuzz`) — a real primary and a
+  `--follow` server over the same directory, plus the remote `grange follow`
+  path, driven by a random op stream that includes the transitions which broke
+  replication before (cold conversion, flushes that delete the chunks a follower
+  was tracking, compaction, index builds) and a **follower restart mid-stream**.
+  The follower's full state must equal the primary's after every op. It found
+  two real bugs on its first run (see below) and is mutation-tested too.
+- **Integrity check** (`grange verify` / `GET /verify`) — walks every file's
+  checksum and record stream, cross-checks each cold manifest against the pages
+  it claims, and confirms declared indexes exist and agree with the data.
+  Detects a flipped byte, a truncated page and a missing index page; exit 92 on
+  damage. Both crash harnesses call it after every recovery, so a kill -9 has to
+  leave the database *structurally* intact, not merely answerable.
 - **Crash injection** (`make crash`) — `kill -9` mid-flight on cold collections,
   where a commit spans many files (pages, then a manifest) and compaction
   rewrites a whole generation. Recovery must open cleanly, agree with filtered

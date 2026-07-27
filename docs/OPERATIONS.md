@@ -103,3 +103,21 @@ those, and an index build over a very large collection can still trip it (a
 restart mid-build is safe: without its manifest an incomplete run is ignored,
 the declaration persists, and queries fall back to scanning until a later
 compaction rebuilds it).
+
+## Integrity checks (M23)
+
+`grange verify --db <dir> --coll <name>` (or `GET /verify?coll=…`) reports
+`{intact, mode, gen, files_checked, runs, issues[]}` and exits 92 if anything is
+wrong. It is the answer to "is my data actually intact?", which queries cannot
+give: a query only touches the pages it needs.
+
+Use it:
+- after any crash or watchdog restart (both crash harnesses now do);
+- before and after moving a database between machines — when the 500 MB tripwire
+  fires, verify on both sides is the difference between a migration and a hope;
+- from a cron on the hosted instance if you want early warning of disk rot.
+
+It checks checksums and record structure for every `.grg`/`.cmeta` file, that a
+cold manifest's count matches what its pages actually hold, that every field a
+run says it indexed has its index pages, and (deep mode) that a sample of index
+entries names ids the run really holds with the value the entry claims.

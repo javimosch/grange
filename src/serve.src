@@ -365,12 +365,29 @@ func srv_handle(req) (res) {
     if req.method == "GET" && has_prefix(req.path, "/export") {
         if query(req, "format") == "lines" {
             gr_sweep_expired()
-            ids := keys(g_mem)
             lines := []string{}
-            i := 0
-            while i < len(ids) {
-                lines = append(lines, ids[i] + "\t" + g_mem[ids[i]])
-                i = i + 1
+            if g_cold == 1 {
+                // a cold collection keeps most docs in run pages: exporting only
+                // the memtable made `grange follow` resync a PARTIAL dataset
+                maxp := cold_maxp()
+                pg := 0
+                while pg < maxp {
+                    grp := cold_group(pg, maxp)
+                    gids := keys(grp)
+                    gi := 0
+                    while gi < len(gids) {
+                        lines = append(lines, gids[gi] + "\t" + grp[gids[gi]])
+                        gi = gi + 1
+                    }
+                    pg = pg + 1
+                }
+            } else {
+                ids := keys(g_mem)
+                i := 0
+                while i < len(ids) {
+                    lines = append(lines, ids[i] + "\t" + g_mem[ids[i]])
+                    i = i + 1
+                }
             }
             res = response("200 OK", "text/plain", join(lines, "\n"))
             return
@@ -432,6 +449,15 @@ func srv_handle(req) (res) {
             return
         }
         res = srv_ok("{\"gen\":" + str(g_gen) + ",\"docs\":" + str(gr_count()) + "}")
+        return
+    }
+    if req.method == "GET" && has_prefix(req.path, "/verify") {
+        vdata, vissues := gr_verify(1)
+        if vissues > 0 {
+            res = srv_json("500 Internal Server Error", "{\"ok\":false,\"error\":{\"type\":\"corruption\",\"message\":\"" + str(vissues) + " integrity issue(s)\"},\"data\":" + vdata + "}")
+            return
+        }
+        res = srv_ok(vdata)
         return
     }
     if req.method == "GET" && has_prefix(req.path, "/stats") {

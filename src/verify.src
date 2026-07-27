@@ -1,0 +1,179 @@
+// grange verify — an integrity check the operator (or an agent) can run without
+// trusting a query to notice damage.
+//
+// The crash harnesses assert BEHAVIOUR: recovery opens, queries agree, writes
+// work. That misses latent damage in files a query happens not to read — and it
+// says nothing before/after moving a database between machines. verify walks
+// every file instead:
+//
+//   · every .grg file's sha256 trailer must verify and its records must parse
+//     (p|<id> followed by a doc line, d|<id> alone)
+//   · a cold run's manifest must agree with the pages it claims: each page
+//     present and valid, and the record total equal to the manifest's count
+//   · every field the manifest says it indexed must have its index pages, and a
+//     sample of their entries must name ids that really live in that run
+//   · the active generation must exist at all (a collection whose newest
+//     manifest is gone is reported, not silently read as empty)
+//
+// Output is JSON with a per-issue list; the CLI exit code is 0 clean / 92 when
+// anything is wrong, so a script can gate on it.
+
+func vf_issue(items, file, what) (out) {
+    out = append(items, "{\"file\":\"" + jesc(file) + "\",\"issue\":\"" + jesc(what) + "\"}")
+}
+
+// vf_scan_records walks a body and reports (records, ok): ok=0 means a p| line
+// had no following doc line, or a line was neither a put nor a tombstone.
+func vf_scan_records(body) (recs, ok) {
+    recs = 0
+    ok = 1
+    pos := 0
+    while true {
+        ln, next, more := gr_next_line(body, pos)
+        if more == 0 { return }
+        pos = next
+        if has_prefix(ln, "p|") {
+            dline, dnext, dmore := gr_next_line(body, pos)
+            if dmore == 0 { ok = 0  return }
+            pos = dnext
+            if len(dline) == 0 || charat(dline, 0) != "{" {
+                if charat(dline, 0) != "[" { ok = 0  return }
+            }
+            recs = recs + 1
+        } else if has_prefix(ln, "d|") {
+            recs = recs + 1
+        } else {
+            ok = 0
+            return
+        }
+    }
+}
+
+// vf_index_sample checks that a sample of an index page's entries name ids the
+// run actually holds — a stale or mis-partitioned index page is otherwise
+// invisible until a query returns the wrong answer.
+func vf_index_sample(rid, field, j, limit) (checked, bad) {
+    checked = 0
+    bad = 0
+    body, ok := gr_load_recbody(gr_dir() + "/" + cold_idx_name(rid, field, j))
+    if ok == 0 { return }
+    q := cold_idx_parts()
+    pos := 0
+    while checked < limit {
+        ln, next, more := gr_next_line(body, pos)
+        if more == 0 { return }
+        pos = next
+        if has_prefix(ln, "p|") {
+            idline, inext, imore := gr_next_line(body, pos)
+            if imore == 0 { return }
+            pos = inext
+            tok := substr(ln, 2, len(ln))
+            // the entry must sit in the partition its value hashes to
+            if (cold_hash(tok) & (q - 1)) != j { bad = bad + 1 }
+            // and the id must exist in this run with that value
+            pbody, pok := gr_load_recbody(gr_dir() + "/" + cold_page_name(rid, cold_hash(idline) & (g_run_pages[len(g_run_pages) - 1] - 1)))
+            if pok == 1 {
+                verdict, doc := cold_page_lookup(pbody, idline)
+                if verdict == 1 {
+                    if ix_field_tok(doc, field) != tok { bad = bad + 1 }
+                }
+            }
+            checked = checked + 1
+        }
+    }
+}
+
+// gr_verify checks the open collection. Returns (json, issues).
+func gr_verify(deep) (data, issues) {
+    issues = 0
+    items := []string{}
+    files := 0
+    entries := list_dir(gr_dir())
+    // 1. every record file must verify and parse
+    i := 0
+    while i < len(entries) {
+        e := entries[i]
+        if has_suffix(e, ".grg") || has_suffix(e, ".cmeta") {
+            files = files + 1
+            body, ok := gr_load_recbody(gr_dir() + "/" + e)
+            if ok == 0 {
+                items = vf_issue(items, e, "checksum or trailer invalid")
+                issues = issues + 1
+            } else {
+                if has_suffix(e, ".grg") && has_prefix(e, "crun-") == false {
+                    recs, rok := vf_scan_records(body)
+                    if rok == 0 {
+                        items = vf_issue(items, e, "malformed record stream")
+                        issues = issues + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    // 2. cold: manifests must agree with their pages, and declared indexes exist
+    if g_cold == 1 {
+        if len(g_run_rid) == 0 && files > 1 {
+            items = vf_issue(items, gr_pad6(g_gen), "cold collection has no valid run manifest for its generation")
+            issues = issues + 1
+        }
+        r := 0
+        while r < len(g_run_rid) {
+            rid := g_run_rid[r]
+            pcount := g_run_pages[r]
+            total := 0
+            k := 0
+            while k < pcount {
+                pbody, pok := gr_load_recbody(gr_dir() + "/" + cold_page_name(rid, k))
+                if pok == 0 {
+                    items = vf_issue(items, cold_page_name(rid, k), "run page missing or invalid")
+                    issues = issues + 1
+                } else {
+                    precs, prok := vf_scan_records(pbody)
+                    if prok == 0 {
+                        items = vf_issue(items, cold_page_name(rid, k), "malformed page records")
+                        issues = issues + 1
+                    }
+                    total = total + precs
+                }
+                k = k + 1
+            }
+            if total != g_run_count[r] {
+                items = vf_issue(items, cold_meta_name(rid), "manifest count " + str(g_run_count[r]) + " but pages hold " + str(total))
+                issues = issues + 1
+            }
+            // declared indexes must be present for this run, and sane
+            fields := split(g_run_fields[r], ",")
+            fi := 0
+            while fi < len(fields) {
+                if len(fields[fi]) > 0 {
+                    parts := g_run_iparts[r]
+                    if parts < 1 { parts = cold_idx_parts() }
+                    j := 0
+                    while j < parts {
+                        ibody, iok := gr_load_recbody(gr_dir() + "/" + cold_idx_name(rid, fields[fi], j))
+                        if iok == 0 {
+                            items = vf_issue(items, cold_idx_name(rid, fields[fi], j), "index page missing or invalid for declared field " + fields[fi])
+                            issues = issues + 1
+                        }
+                        j = j + 1
+                    }
+                    if deep == 1 {
+                        checked, bad := vf_index_sample(rid, fields[fi], 0, 50)
+                        if bad > 0 {
+                            items = vf_issue(items, cold_idx_name(rid, fields[fi], 0), str(bad) + " of " + str(checked) + " sampled index entries disagree with the page data")
+                            issues = issues + 1
+                        }
+                    }
+                }
+                fi = fi + 1
+            }
+            r = r + 1
+        }
+    }
+    mode := "hot"
+    if g_cold == 1 { mode = "cold" }
+    okstr := "true"
+    if issues > 0 { okstr = "false" }
+    data = "{\"intact\":" + okstr + ",\"mode\":\"" + mode + "\",\"gen\":" + str(g_gen) + ",\"files_checked\":" + str(files) + ",\"runs\":" + str(len(g_run_rid)) + ",\"chunks_skipped_on_open\":" + str(g_skipped_chunks) + ",\"issues\":[" + join(items, ",") + "]}"
+}

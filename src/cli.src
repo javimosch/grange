@@ -277,6 +277,19 @@ func main() {
     if verb == "indexes" { cmd_indexes(fs)  return }
     if verb == "agg" { cmd_agg(fs)  return }
     if verb == "stats" { cmd_stats(fs)  return }
+    if verb == "verify" {
+        do_open(fs)
+        vdata, vissues := gr_verify(1)
+        if vissues > 0 {
+            // stdout keeps the same envelope as every other verb so a script can
+            // parse .data either way; stderr carries the typed error, exit 92
+            println("{\"ok\":false,\"data\":" + vdata + "}")
+            write(2, "{\"ok\":false,\"error\":{\"type\":\"corruption\",\"message\":\"" + str(vissues) + " integrity issue(s) — see .data.issues on stdout\",\"recoverable\":false,\"suggestions\":[\"restore from a backup, or compact a healthy replica over this copy\"]}}\n")
+            exit(92)
+        }
+        emit_ok(vdata)
+        return
+    }
     if verb == "serve" { cmd_serve(fs)  return }
     if verb == "follow" { cmd_follow(fs)  return }
     if verb == "bench" { cmd_bench(fs)  return }
