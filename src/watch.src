@@ -14,7 +14,7 @@ func srv_rss_watchdog() {
     if rss < maxmb * 1024 { return }
     // over budget: flush state and let systemd restart us — the crash-safe WAL
     // makes a restart a cheap arena reset, and eviction bounds what reloads
-    write(2, "{\"event\":\"rss_restart\",\"rss_kb\":" + str(rss) + ",\"max_mb\":" + str(maxmb) + ",\"loaded\":" + str(len(keys(R_loaded))) + "}\n")
+    write(2, "{\"event\":\"rss_restart\",\"rss_kb\":" + str(rss) + ",\"max_mb\":" + str(maxmb) + ",\"loaded\":" + str(len(R_loaded)) + "}\n")
     gr_commit()
     uok, uerr := gr_use(g_srv_db, "_sys")
     if uok == 1 { tn_rl_flush()  gr_commit() }
@@ -42,8 +42,16 @@ func watch_payload(since) (data) {
 
 // srv_write_res writes a Response to fd and closes it (our own loop's writer).
 func srv_write_res(fd, res) {
-    out := "HTTP/1.1 " + res.status + "\r\nContent-Type: " + res.ctype + "\r\nContent-Length: " + str(len(res.body)) + "\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n" + res.body
-    write(fd, out)
+    // `out` is headers + a full COPY of the body, so a 100-document response
+    // pays for that body twice. Nothing here outlives the write — the string is
+    // handed to a syscall — so it can be scoped and reclaimed. (The body ITSELF
+    // is still retained: handlers escape() it out of their arena into the
+    // long-lived one, which only a per-request arena around the whole loop
+    // would fix. See docs/OPERATIONS.md.)
+    arena {
+        out := "HTTP/1.1 " + res.status + "\r\nContent-Type: " + res.ctype + "\r\nContent-Length: " + str(len(res.body)) + "\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n" + res.body
+        write(fd, out)
+    }
     close(fd)
 }
 

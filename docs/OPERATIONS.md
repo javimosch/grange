@@ -620,3 +620,64 @@ machin's Falsifier also earned its place during this milestone: it flagged
 `cs_cleanup(rid, field, nruns, runpages)` as an out-of-range read for
 `nruns=1, runpages=[]`. No caller passes that, but it is a signature with two
 parameters that must agree; the length is now the count.
+
+## M37: the count that allocated the collection
+
+README item: "Per-request arena scoping is the next engine milestone." Before
+attempting it, M37 measured what a request actually retains. A long-lived server
+holds some memory per request — the single actor's arena is reclaimed only when
+the goroutine returns, which it never does — so the question is how much, and
+whether any of it scales with the data.
+
+Measured on a 20k-document collection, RSS delta per request:
+
+| request | kB retained |
+|---|---|
+| `/health` (no collection, no query) | 8 |
+| `/count?coll=h` (no filter) | **71** |
+| `/count?coll=h&where=site=a.io` (indexed) | 10 |
+| `/get?coll=h&id=k5` | 10 |
+| `/find ... limit=20` | 16 |
+| `/find ... limit=100` | 34 |
+
+An unfiltered count cost SEVEN TIMES an indexed one. `gr_count()` was
+`len(keys(g_mem))`, and `keys()` materialises every key just to count them: 20k
+strings allocated and retained, per request, for the simplest operation the
+database has. `len(map)` is O(1) and allocates nothing. The same idiom was on
+two more hot paths — the cold-threshold check runs on EVERY COMMIT, and
+`cold_stable()` runs on every cold query — plus four cooler ones.
+
+After the fix, an unfiltered count is 10 kB/request and no longer varies with
+collection size.
+
+Nothing caught this because every other harness measures ANSWERS, and the answer
+was always correct. `scripts/retention_test.sh` (`make retention`) measures
+memory instead: it asserts an unfiltered count costs about the same on 1k and
+20k documents (the shape, by comparison, not an absolute number), and that no
+route exceeds a per-request ceiling. Its negative control: restore
+`len(keys(...))` and it reports `11 -> 71 kB`.
+
+### Why the per-request arena is still not wrapped
+
+The accept loop carries a note explaining that it cannot be wrapped in an
+`arena { }` because `gr_use` stores request-derived strings (`g_db`, `g_coll`,
+registry keys) into globals deep in the call chain. That is still true, and M37
+found the second half of the reason: handlers `escape()` their response body OUT
+of the handler's arena into the long-lived one, so the body is retained even
+though the query that built it was reclaimed. Wrapping the loop would fix that —
+and would also, today, leave `g_db`/`g_coll` dangling.
+
+Making it safe needs either interprocedural ARENA001 provenance (machin#539, so
+the hazard is a compile error rather than a segfault found in production) or an
+`escape()` usable in a callee. Until then the honest position is: the remaining
+~8 kB/request baseline is bounded by the RSS watchdog, and the thing that
+mattered — a cost that grew with the data — is fixed and guarded.
+
+One safe piece was scoped: `srv_write_res` built headers plus a full COPY of the
+body before writing. Nothing there outlives the syscall, so it is now inside an
+arena. Worth ~1 kB/request, measured, and recorded here so nobody re-derives it
+expecting more.
+
+Also fixed: `/stats` reported `rss_kb` on cold collections but not hot ones, so
+an operator watching a hot deployment had no memory signal from the API. It
+reports it on both now — the omission cost a measurement during this milestone.

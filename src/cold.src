@@ -272,7 +272,7 @@ func cold_count_all() (n) {
     maxp := cold_maxp()
     k := 0
     while k < maxp {
-        arena { n = n + len(keys(cold_group(k, maxp))) }
+        arena { n = n + len(cold_group(k, maxp)) }
         k = k + 1
     }
 }
@@ -357,7 +357,7 @@ func gr_cold_enable() (ok, errmsg) {
     errmsg = ""
     if g_cold == 1 { ok = 1  return }
     if len(g_ifields) > 0 { errmsg = "drop indexes first: cold collections have no secondary indexes"  return }
-    if len(keys(g_ttl)) > 0 { errmsg = "cold collections do not support TTL docs"  return }
+    if len(g_ttl) > 0 { errmsg = "cold collections do not support TTL docs"  return }
     if gr_commit() == 0 { errmsg = "commit failed"  return }
     if write_file(gr_dir() + "/cold.flag", "1\n") < 0 { errmsg = "cannot write cold.flag"  return }
     g_cold = 1
@@ -384,7 +384,7 @@ func cold_threshold() (n) {
 // cold_count_est: cheap upper-bound (run record counts + memtable; overwrites
 // and tombstones across runs double-count until compaction) — used by stats.
 func cold_count_est() (n) {
-    n = len(keys(g_mem))
+    n = len(g_mem)
     i := 0
     while i < len(g_run_count) { n = n + g_run_count[i]  i = i + 1 }
 }

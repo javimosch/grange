@@ -121,7 +121,7 @@ func gr_evict() {
     delete(R_cifields, oldest)
     delete(R_cikind, oldest)
     delete(g_touch, oldest)
-    write(2, "{\"event\":\"evicted\",\"key\":\"" + oldest + "\",\"loaded\":" + str(len(keys(R_loaded))) + "}\n")
+    write(2, "{\"event\":\"evicted\",\"key\":\"" + oldest + "\",\"loaded\":" + str(len(R_loaded)) + "}\n")
 }
 
 func gr_use(db, coll) (ok, errmsg) {

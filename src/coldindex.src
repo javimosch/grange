@@ -400,8 +400,8 @@ func cold_idx_resolve(cands, fields, ops, vals, limit, countonly) (items, n) {
 func cold_stable() (yes) {
     yes = 0
     if len(g_run_rid) != 1 { return }
-    if len(keys(g_mem)) > 0 { return }
-    if len(keys(g_tomb)) > 0 { return }
+    if len(g_mem) > 0 { return }
+    if len(g_tomb) > 0 { return }
     yes = 1
 }
 

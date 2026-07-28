@@ -122,7 +122,10 @@ func srv_tail_routes(req) (res, handled) {
             res = srv_ok("{\"coll\":\"" + jesc(g_coll) + "\",\"cold\":true,\"docs_estimate\":" + str(cold_count_est()) + ",\"runs\":" + str(len(g_run_rid)) + ",\"gen\":" + str(g_gen) + ",\"cold_indexes\":" + str(len(g_cifields)) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}")
             return
         }
-        res = srv_ok("{\"coll\":\"" + jesc(g_coll) + "\",\"docs\":" + str(gr_count()) + ",\"gen\":" + str(g_gen) + ",\"chunks_replayed\":" + str(g_replayed_chunks) + ",\"indexes\":" + str(len(g_ifields)) + "}")
+        // rss_kb on the hot branch too: the cold branch reported it and this one
+        // did not, so an operator watching a hot deployment had no memory
+        // signal from the API at all (it cost me a measurement in M37).
+        res = srv_ok("{\"coll\":\"" + jesc(g_coll) + "\",\"docs\":" + str(gr_count()) + ",\"gen\":" + str(g_gen) + ",\"chunks_replayed\":" + str(g_replayed_chunks) + ",\"indexes\":" + str(len(g_ifields)) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}")
         return
     }
     handled = 0

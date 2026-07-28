@@ -470,7 +470,7 @@ func gr_commit() (ok) {
         // this returns, the commit survives a power cut.
         gr_sync_dir()
         g_next_chunk = g_next_chunk + 1
-        if g_cold == 1 && len(keys(g_mem)) + len(keys(g_tomb)) >= cold_threshold() {
+        if g_cold == 1 && len(g_mem) + len(g_tomb) >= cold_threshold() {
             cold_flush()
             if len(g_run_rid) > cold_max_runs() { gr_compact() }
         }
@@ -517,7 +517,9 @@ func gr_count() (n) {
         n = cold_count_all()
         return
     }
-    n = len(keys(g_mem))
+    // len(map) is O(1); len(keys(map)) MATERIALISES every key just to count
+    // them — 20k strings allocated per /count on a 20k collection
+    n = len(g_mem)
 }
 
 // gr_compact writes a fresh segment at gen+1 and removes older files.
