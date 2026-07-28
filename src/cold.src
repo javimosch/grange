@@ -275,7 +275,36 @@ func cold_maxp() (p) {
 }
 
 // cold_count_all streams every page group (RAM = one group at a time).
+// The count of a cold collection changes only when documents are written, and
+// every committed record advances g_seq — so g_seq is a version stamp the cache
+// can key on. A mirror that syncs every few minutes and is counted in between
+// pays for the scan once per sync instead of once per request.
+//
+// This is what production needed. The stable-run shortcut below only helps a
+// collection with exactly ONE run, and the live mirror accumulates several
+// between compactions, so it fell straight through to the scan: still 83 kB per
+// request after the "fix" was deployed.
+var g_cc_db = ""
+var g_cc_coll = ""
+var g_cc_seq = 0 - 1
+var g_cc_val = 0
+
 func cold_count_all() (n) {
+    n = 0
+    if g_cc_seq == g_seq && g_cc_db == g_db && g_cc_coll == g_coll {
+        n = g_cc_val
+        return
+    }
+    n = cold_count_compute()
+    // g_db/g_coll are long-lived globals, so caching them copies a reference
+    // into the same arena, not into a request's (cf. machin#539)
+    g_cc_db = g_db
+    g_cc_coll = g_coll
+    g_cc_seq = g_seq
+    g_cc_val = n
+}
+
+func cold_count_compute() (n) {
     n = 0
     // A stable collection (one run, nothing unflushed, no tombstones) has every
     // id exactly once, and the manifest already records how many — so the count

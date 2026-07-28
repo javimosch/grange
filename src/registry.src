@@ -301,6 +301,12 @@ func gr_reset() (ok) {
 // (someone compacted): full reopen. Returns records applied (-1 = reopened).
 func gr_refresh() (applied) {
     applied = 0
+    // A follower's data changes when the primary's files change, and that does
+    // NOT go through this process's commit path — so g_seq, which the cold
+    // count cache keys on, may not move. Invalidate explicitly: a stale count
+    // on a replica would be a silent wrong answer, which is worse than the
+    // scan it saves.
+    g_cc_seq = 0 - 1
     entries := list_dir(gr_dir())
     // A cold collection keeps its generation in crun-*.cmeta names, not seg-*,
     // and a flush REPLACES the WAL chunks with a new run — which also restarts

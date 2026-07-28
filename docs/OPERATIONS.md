@@ -712,3 +712,25 @@ answering with a stale number.
 
 `scripts/retention_test.sh` now measures a COLD collection too. Testing only the
 hot shape is what let an 8x regression reach production in the first place.
+
+### ...and the shortcut still did not help production
+
+Deployed, the live count was STILL 83 kB per request. The stable-run shortcut
+needs exactly ONE run, and the mirror accumulates several between compactions,
+so it fell straight through to the scan. Two fixes in a row, both measured on
+shapes production does not have.
+
+A cold collection's count changes only when documents are written, and every
+committed record advances `g_seq` — so `g_seq` is a version stamp the count can
+be cached against, keyed by (db, coll, seq). A mirror that syncs every few
+minutes and is counted in between now pays for the scan once per sync instead of
+once per request.
+
+The cache is also invalidated explicitly in `gr_refresh`, because a FOLLOWER's
+data changes when the primary's files change, which does not go through this
+process's commit path and so may not move `g_seq`. A stale count on a replica is
+a silent wrong answer, which is worse than the scan it saves.
+
+Validated by the two differential fuzzes, which compare counts after every
+operation including deletes, flushes and compactions (7200 ops), and by the
+replication fuzz for the follower path.
