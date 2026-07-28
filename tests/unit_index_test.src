@@ -209,6 +209,65 @@ func ui_ordered_queries() {
     assert_eq_str(fv0, "10", "highest v among grp=g0 only")
 }
 
+
+// M35: keyset cursors. The end-to-end walk is covered by
+// scripts/pagination_test.sh; these pin the pieces it relies on.
+func ui_cursors() {
+    // round-trip, including a negative value and an id containing punctuation
+    c := ord_cursor_make(0.0 - 12.5, "user@example.com")
+    v, id, ok := ord_cursor_parse(c)
+    assert_eq_int(ok, 1, "cursor parses")
+    assert_eq_str(str(v), "-12.5", "value round-trips")
+    assert_eq_str(id, "user@example.com", "id round-trips")
+
+    // large integers must not go through %g and lose precision — a timestamp
+    // cursor that rounds would resume at the wrong place
+    c = ord_cursor_make(1785223773.0, "e728")
+    assert_eq_str(c, "1785223773|e728", "a timestamp cursor is not rounded")
+    v, id, ok = ord_cursor_parse(c)
+    // compare through ix_fstr, not str(): str() is %g and would print
+    // 1.78522e+09 for a value that round-tripped perfectly. The cursor never
+    // goes through str(), so asserting on str() would test the wrong thing.
+    assert_eq_str(ix_fstr(v), "1785223773", "timestamp value round-trips exactly")
+    assert_eq_str(id, "e728", "id after a long value")
+
+    // malformed cursors are refused, not guessed at
+    v, id, ok = ord_cursor_parse("")
+    assert_eq_int(ok, 0, "empty cursor is not a cursor")
+    v, id, ok = ord_cursor_parse("12.5")
+    assert_eq_int(ok, 0, "value with no id is refused")
+    v, id, ok = ord_cursor_parse("12.5|")
+    assert_eq_int(ok, 0, "empty id is refused")
+
+    // full-key seek: the position of a key among EQUAL values is what a
+    // cursor needs, and what a value-only search cannot give
+    db := "/tmp/grange-ut-cur-" + str(now_ms())
+    o, e := gr_open(db, "c")
+    gr_put("a", "{\"v\":5}")
+    gr_put("b", "{\"v\":5}")
+    gr_put("c", "{\"v\":5}")
+    gr_put("d", "{\"v\":9}")
+    gr_commit()
+    assert_eq_int(gr_index_add("v", "", "range"), 1, "range index")
+    rb_ensure("v")
+    // strictly after (5,"b") is "c" at index 2; at-or-after (5,"b") is index 1
+    assert_eq_int(rb_seek_key("v", 5.0, "b", 0), 2, "seek strictly past a tied key")
+    assert_eq_int(rb_seek_key("v", 5.0, "b", 1), 1, "seek to a tied key")
+    assert_eq_int(rb_seek_key("v", 5.0, "zzz", 0), 3, "past every tie at that value")
+    assert_eq_int(rb_seek_key("v", 0.0, "a", 0), 0, "before everything")
+    assert_eq_int(rb_seek_key("v", 99.0, "a", 0), 4, "after everything")
+
+    // and a short page offers no cursor: there is nothing after it
+    d1, ok1, w1 := q_find_page("", 2, "v", 0, "")
+    n1, n1err := json_get(d1, ".next")
+    assert_eq_int(len(n1err), 0, "a full page offers a cursor")
+    d2, ok2, w2 := q_find_page("", 100, "v", 0, "")
+    n2, n2err := json_get(d2, ".next")
+    shorthasnone := 0
+    if len(n2err) > 0 { shorthasnone = 1 }
+    assert_eq_int(shorthasnone, 1, "a short page offers none")
+}
+
 func main() {
     ui_fstr()
     ui_tokens()
@@ -216,5 +275,6 @@ func main() {
     ui_range_projection()
     ui_msort()
     ui_ordered_queries()
+    ui_cursors()
     test_summary()
 }

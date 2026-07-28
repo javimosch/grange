@@ -70,10 +70,26 @@ class Grange {
   // where: "f=v,f2>=v2" (ANDed; = > < >= <=). Returns { count, mode, items: [{id, doc}] }.
   // order: a --range-indexed field name; desc: newest/highest first. Without an
   // order a limit returns an arbitrary subset, not the top/latest N.
-  async find(where = '', { limit = 100, order = '', desc = false } = {}) {
+  // after: the `next` cursor from the previous page. Keyset, not offset — every
+  // page costs the same, and inserts/deletes elsewhere cannot shift it.
+  async find(where = '', { limit = 100, order = '', desc = false, after = '' } = {}) {
     let q = `/find?${this._qs}&where=${encodeURIComponent(where)}&limit=${limit}`;
     if (order) q += `&order=${encodeURIComponent(order)}${desc ? '&desc=1' : ''}`;
+    if (after) q += `&after=${encodeURIComponent(after)}`;
     return this._req('GET', q);
+  }
+
+  // pages walks every page of an ordered query, yielding documents. The loop
+  // callers would otherwise write by hand, including stopping when the server
+  // stops offering a cursor.
+  async *pages(where = '', { limit = 100, order = '', desc = false } = {}) {
+    let after = '';
+    for (;;) {
+      const page = await this.find(where, { limit, order, desc, after });
+      for (const item of page.items) yield item;
+      if (!page.next) return;
+      after = page.next;
+    }
   }
 
   async count(where = '') {

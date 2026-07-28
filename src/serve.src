@@ -267,7 +267,7 @@ func srv_handle(req) (res) {
             ook := 0
             owhy := ""
             arena {
-                d, k, w := q_find_ordered(wh, limit, ofield, odesc)
+                d, k, w := q_find_page(wh, limit, ofield, odesc, query(req, "after"))
                 body = escape(d)
                 ook = k
                 owhy = escape(w)

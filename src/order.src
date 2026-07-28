@@ -38,6 +38,41 @@ func ord_parse(spec, descflag) (field, desc) {
     }
 }
 
+// ---- cursors (keyset pagination) ----
+//
+// A cursor is the sort key of the last row of the previous page: "<value>|<id>".
+// The next page resumes STRICTLY after it, in the query's direction. Ids cannot
+// contain "|" (valid_id rejects it, it is the record separator), so the split is
+// unambiguous.
+//
+// Keyset, not offset. `offset=N` has to walk N rows to skip them, so paging
+// through a collection costs O(n^2) overall and page 500 is 500x the price of
+// page 1; a keyset cursor is a seek, so every page costs the same. It is also
+// correct under concurrent writes in a way offset is not: with an offset, a row
+// inserted before your position shifts everything and you see one row twice,
+// while a deletion makes you skip one. A cursor names a POSITION IN THE ORDER,
+// so inserts and deletes elsewhere cannot shift it.
+//
+// What it still does not promise: a row that is MODIFIED between pages moves in
+// the order, so it can be seen twice or missed. That is inherent to reading a
+// changing collection without a snapshot, and it is the honest limit.
+func ord_cursor_parse(cur) (cval, cid, ok) {
+    cval = 0.0
+    cid = ""
+    ok = 0
+    if len(cur) == 0 { return }
+    bar := index(cur, "|")
+    if bar <= 0 { return }
+    cval = parse_float(substr(cur, 0, bar))
+    cid = substr(cur, bar + 1, len(cur))
+    if len(cid) == 0 { return }
+    ok = 1
+}
+
+func ord_cursor_make(val, id) (s) {
+    s = ix_fstr(val) + "|" + id
+}
+
 // ord_ready reports whether `field` can be ordered on in the current mode, and
 // if not, why — the message names the command that makes it possible.
 func ord_ready(field) (yes, why) {
@@ -100,17 +135,30 @@ func ord_warm(field) {
 // every clause and stopping at the limit. Cost is O(log n) for the span plus
 // one match per document actually returned — the whole point of ordering on an
 // already-sorted structure.
-func ord_find_hot(fields, ops, vals, limit, ofield, desc) (items, n) {
+func ord_find_hot(fields, ops, vals, limit, ofield, desc, cur) (items, n, next) {
     items = []string{}
     n = 0
+    next = ""
     rb_ensure(ofield)
     rids := g_rids[ofield]
+    rvals := g_rvals[ofield]
     lo := 0
     hi := len(rids)
     sf, so, sv := ord_span_clauses(fields, ops, vals, ofield)
     if len(sf) > 0 { lo, hi = rb_bounds_all(sf, so, sv) }
     i := lo
     if desc == 1 { i = hi - 1 }
+    // resume: a seek, not a skip — page 500 costs what page 1 costs
+    cval, cid, cok := ord_cursor_parse(cur)
+    if cok == 1 {
+        if desc == 1 {
+            i = rb_seek_key(ofield, cval, cid, 1) - 1
+            if i >= hi { i = hi - 1 }
+        } else {
+            i = rb_seek_key(ofield, cval, cid, 0)
+            if i < lo { i = lo }
+        }
+    }
     while true {
         if desc == 1 {
             if i < lo { return }
@@ -125,6 +173,7 @@ func ord_find_hot(fields, ops, vals, limit, ofield, desc) (items, n) {
             if wh_match(doc, fields, ops, vals) == 1 {
                 items = append(items, "{\"id\":\"" + jesc(id) + "\",\"doc\":" + doc + "}")
                 n = n + 1
+                next = ord_cursor_make(rvals[i], id)
             }
         }
         if desc == 1 { i = i - 1 } else { i = i + 1 }
@@ -224,10 +273,25 @@ func ord_cold_pairs(ofield, sf, so, sv) (ovals, oids) {
     ovals, oids = rb_msort(vals, ids)
 }
 
-func ord_find_cold(fields, ops, vals, limit, ofield, desc) (items, n) {
+func ord_find_cold(fields, ops, vals, limit, ofield, desc, cur) (items, n, next) {
     items = []string{}
     n = 0
+    next = ""
     sf, so, sv := ord_span_clauses(fields, ops, vals, ofield)
+    cval, cid, cok := ord_cursor_parse(cur)
+    if cok == 1 {
+        // the cursor is also a BOUND: pages that cannot hold anything at or
+        // beyond it are skipped by their recorded min/max, so resuming does not
+        // re-read the pages already paged through. This is what keeps page N as
+        // cheap as page 1 on cold storage, where page reads are the real cost.
+        sf = append(sf, ofield)
+        if desc == 1 {
+            so = append(so, "<=")
+        } else {
+            so = append(so, ">=")
+        }
+        sv = append(sv, ix_fstr(cval))
+    }
     pv, pid := ord_cold_pairs(ofield, sf, so, sv)
     seen := make(map[string]int)
     i := 0
@@ -240,6 +304,21 @@ func ord_find_cold(fields, ops, vals, limit, ofield, desc) (items, n) {
         }
         if limit > 0 && n >= limit { return }
         id := pid[i]
+        // strictly past the cursor key, in this direction
+        skip := 0
+        if cok == 1 {
+            if desc == 1 {
+                if pv[i] > cval { skip = 1 }
+                if pv[i] == cval && id >= cid { skip = 1 }
+            } else {
+                if pv[i] < cval { skip = 1 }
+                if pv[i] == cval && id <= cid { skip = 1 }
+            }
+        }
+        if skip == 1 {
+            if desc == 1 { i = i - 1 } else { i = i + 1 }
+            continue
+        }
         if has(seen, id) == false {
             doc, found := cold_get(id)
             q_cost_docs(1)
@@ -259,6 +338,7 @@ func ord_find_cold(fields, ops, vals, limit, ofield, desc) (items, n) {
                     if wh_match(doc, fields, ops, vals) == 1 {
                         items = append(items, "{\"id\":\"" + jesc(id) + "\",\"doc\":" + doc + "}")
                         n = n + 1
+                        next = ord_cursor_make(pv[i], id)
                     }
                 }
             }
@@ -270,6 +350,13 @@ func ord_find_cold(fields, ops, vals, limit, ofield, desc) (items, n) {
 // q_find_ordered is the entry point: returns (data, ok, why). ok=0 means the
 // field cannot be ordered on and `why` says what to declare.
 func q_find_ordered(wh, limit, ofield, desc) (data, ok, why) {
+    data, ok, why = q_find_page(wh, limit, ofield, desc, "")
+}
+
+// q_find_page is q_find_ordered plus a cursor: pass the previous response's
+// `next` to get the following page. `next` is omitted when the page came back
+// short, which is the caller's signal that there is nothing after it.
+func q_find_page(wh, limit, ofield, desc, cur) (data, ok, why) {
     data = ""
     ok = 0
     q_cost_reset()
@@ -285,13 +372,20 @@ func q_find_ordered(wh, limit, ofield, desc) (data, ok, why) {
     mode := "range-ordered"
     items := []string{}
     n := 0
+    next := ""
     if g_cold == 1 {
         mode = "cold-range-ordered"
-        items, n = ord_find_cold(fields, ops, vals, limit, ofield, desc)
+        items, n, next = ord_find_cold(fields, ops, vals, limit, ofield, desc, cur)
     } else {
-        items, n = ord_find_hot(fields, ops, vals, limit, ofield, desc)
+        items, n, next = ord_find_hot(fields, ops, vals, limit, ofield, desc, cur)
     }
     dir := "asc"
     if desc == 1 { dir = "desc" }
-    data = "{\"count\":" + str(n) + ",\"mode\":\"" + mode + "\",\"order\":\"" + jesc(ofield) + "\",\"dir\":\"" + dir + "\"" + q_cost_json() + ",\"items\":[" + join(items, ",") + "]}"
+    // a short page means the end: offering a cursor there would invite a
+    // pointless extra round trip
+    nextjson := ""
+    if limit > 0 && n >= limit && len(next) > 0 {
+        nextjson = ",\"next\":\"" + jesc(next) + "\""
+    }
+    data = "{\"count\":" + str(n) + ",\"mode\":\"" + mode + "\",\"order\":\"" + jesc(ofield) + "\",\"dir\":\"" + dir + "\"" + nextjson + q_cost_json() + ",\"items\":[" + join(items, ",") + "]}"
 }

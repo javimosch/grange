@@ -498,3 +498,56 @@ warm before their arena. `q_warm`'s condition was tightened to match the one the
 query path uses to WANT the projection — it previously required an extra
 `ix_is_indexed` conjunct, so two predicates in two files had to stay in
 agreement with a use-after-free as the penalty for drift.
+
+## M35: keyset pagination
+
+M33 gave "the latest N". M35 gives "and the N after that", which is what makes
+an ordered query usable for anything that walks data rather than peeking at it.
+
+An ordered response now carries `next`, a cursor of the form `<value>|<id>` —
+the sort key of its last row. `?after=<cursor>` resumes strictly past it in the
+query's direction. `next` is omitted when the page came back short, so a caller
+knows to stop without an extra round trip.
+
+### Why keyset rather than offset
+
+`offset=N` has to walk the N rows it skips, so paging through a collection is
+quadratic overall and page 500 costs 500x page 1. A cursor is a seek: on hot
+collections a binary search on the FULL sort key (`rb_seek_key`), on cold ones
+an extra bound that prunes index pages by their recorded min/max, so pages
+already paged through are not re-read. Every page costs about the same.
+
+Correctness matters more than the cost, though. An offset names a COUNT of rows;
+a cursor names a POSITION IN THE ORDER. With an offset, a row inserted before
+your position shifts everything down and you see a row twice; a deletion makes
+you skip one. A cursor is immune to both.
+
+This is what M33's tie-break bought. A cursor of `<value>` alone cannot place
+itself among documents sharing that value, which is exactly where a page
+boundary is most likely to fall. Because the order is total, "the position just
+past this key" is a single well-defined index.
+
+### The honest limit
+
+A document MODIFIED between pages moves in the order, so it can be seen twice or
+missed. That is inherent to reading a changing collection without a snapshot,
+and no cursor scheme fixes it. Rows that are inserted, deleted, or untouched
+elsewhere are unaffected.
+
+### Verification
+
+`scripts/pagination_test.sh` (`make pagination`) walks entire collections page
+by page and asserts the concatenation is element-for-element identical to the
+one-shot ordered answer: both storage modes, both directions, page sizes chosen
+to land INSIDE runs of equal values, with and without an extra where-clause, and
+inside a bounded window. Plus an independent count that every document came back
+exactly once.
+
+The negative control is worth recording, because it shows the harness has teeth
+and that M33's tie-break was load-bearing rather than cosmetic. With the
+tie-break removed from the merge sort:
+
+    FAIL hot/desc: pages of 13 reproduce the full order —
+         paged=282 oneshot=300 dups=[k082 k083 k104] missing=[k023 k037 k038]
+
+Documents both duplicated and lost, exactly as an unstable order predicts.

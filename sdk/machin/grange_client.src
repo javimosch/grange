@@ -83,8 +83,16 @@ func grange_find(g, where, limit) (data) {
 // --range-indexed field) rather than an arbitrary `limit` of them. desc=1 for
 // newest/highest first.
 func grange_find_ordered(g, where, limit, order, desc) (data) {
+    data = grange_find_page(g, where, limit, order, desc, "")
+}
+
+// grange_find_page resumes after a cursor (the previous page's "next"). Keyset
+// pagination: every page costs the same, and rows inserted or deleted elsewhere
+// cannot shift the position the way an offset would.
+func grange_find_page(g, where, limit, order, desc, after) (data) {
     q := "/find?" + grange_qs(g) + "&where=" + url_encode(where) + "&limit=" + str(limit) + "&order=" + url_encode(order)
     if desc == 1 { q = q + "&desc=1" }
+    if len(after) > 0 { q = q + "&after=" + url_encode(after) }
     status, resp := grange_req(g, "GET", q, "")
     data = grange_data(status, resp)
 }

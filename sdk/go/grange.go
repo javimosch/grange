@@ -142,6 +142,13 @@ type FindResult struct {
 	Count int    `json:"count"`
 	Mode  string `json:"mode"`
 	Items []Item `json:"items"`
+	// Next is the cursor for the following page of an ordered query. Empty
+	// means this was the last page — the server omits it on a short page.
+	Next string `json:"next,omitempty"`
+	// Scanned and Pages report what the query cost: documents examined and
+	// pages read. Useful for telling an index lookup from a scan.
+	Scanned int `json:"scanned"`
+	Pages   int `json:"pages"`
 }
 
 // Find queries with a where filter ("f=v,f2>=v2", ANDed; "" = all). limit 0 = server default.
@@ -155,10 +162,20 @@ func (c *Client) Find(where string, limit int) (*FindResult, error) {
 // order, which must be a --range-indexed field. Without an order a limit
 // returns an arbitrary subset rather than the top/latest N.
 func (c *Client) FindOrdered(where string, limit int, order string, desc bool) (*FindResult, error) {
+	return c.FindPage(where, limit, order, desc, "")
+}
+
+// FindPage is FindOrdered resuming after a cursor: pass the previous result's
+// Next. Keyset pagination, so every page costs the same and rows inserted or
+// deleted elsewhere cannot shift the position the way an offset would.
+func (c *Client) FindPage(where string, limit int, order string, desc bool, after string) (*FindResult, error) {
 	var out FindResult
 	q := fmt.Sprintf("/find?%s&where=%s&limit=%d&order=%s", c.qs(), url.QueryEscape(where), limit, url.QueryEscape(order))
 	if desc {
 		q += "&desc=1"
+	}
+	if after != "" {
+		q += "&after=" + url.QueryEscape(after)
 	}
 	err := c.do("GET", q, nil, &out)
 	return &out, err

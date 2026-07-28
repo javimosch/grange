@@ -246,6 +246,16 @@ make verify   # check + tests (69) + 100k bench + crash harness
   cold, so paginating cannot show a document twice or skip one. Honest cost: on cold, ordering
   materialises the SPAN's index entries, so bound the window (or set a scan budget) rather than
   ordering an entire large collection.
+- PAGINATION is keyset, not offset: an ordered response carries `next`, and `?after=<cursor>`
+  (`--after`, or `pages()` / `FindPage` in the SDKs) resumes strictly past it. Every page costs
+  the same — an offset has to walk the rows it skips, so page 500 would cost 500x page 1 — and a
+  cursor names a POSITION IN THE ORDER, so rows inserted or deleted elsewhere cannot shift it
+  into showing a document twice or skipping one. `next` is omitted on a short page, which is how
+  a caller knows to stop. The limit it does NOT paper over: a document MODIFIED between pages
+  moves in the order, so it can be seen twice or missed — inherent to reading a changing
+  collection without a snapshot. `make pagination` walks whole collections in both directions,
+  on both storage modes, with ties straddling page boundaries, and asserts the concatenation
+  equals the one-shot answer.
 - Durability: a commit is fsynced before it is acknowledged — the chunk's content, then the
   directory entry that makes it exist (`make durability` asserts both at the syscall level, and
   that a cold flush syncs every page before the manifest naming it). Process-crash-exact is

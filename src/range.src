@@ -118,6 +118,39 @@ func rb_gt(vals, x) (lo) {
     }
 }
 
+// rb_seek_key binary-searches the projection by the FULL sort key (value, id).
+//
+// Keyset pagination resumes strictly after a (value, id) pair, and only a
+// search on the whole key can do that: searching by value alone cannot place a
+// cursor among documents that share a value, which is precisely where a page
+// boundary is most likely to fall. This is what M33's tie-break bought — the
+// projection is a total order, so "the position just past this key" is a single
+// well-defined index.
+//
+// ge=1 returns the first index whose key is >= (cv, cid); ge=0 the first index
+// strictly greater.
+func rb_seek_key(f, cv, cid, ge) (idx) {
+    vals := g_rvals[f]
+    ids := g_rids[f]
+    lo := 0
+    hi := len(vals)
+    while lo < hi {
+        mid := (lo + hi) / 2
+        after := 0
+        if vals[mid] > cv {
+            after = 1
+        } else if vals[mid] == cv {
+            if ge == 1 {
+                if ids[mid] >= cid { after = 1 }
+            } else {
+                if ids[mid] > cid { after = 1 }
+            }
+        }
+        if after == 1 { hi = mid } else { lo = mid + 1 }
+    }
+    idx = lo
+}
+
 // rb_bounds resolves op+value to the half-open segment [lo, hi).
 func rb_bounds(f, op, v) (lo, hi) {
     x := parse_float(v)
