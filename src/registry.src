@@ -230,6 +230,15 @@ func gr_apply_live(lines) (recs) {
 // current goroutine's arena would otherwise grow forever (machin #523). After
 // reset, all collections are reloaded from disk on next gr_use. Safe because
 // grange keeps durable data on disk and the registry only caches live maps.
+// gr_reset commits pending writes, drops every in-memory cache, and frees the
+// arena. It is how an EMBEDDER keeps a long-lived process flat — poche calls it
+// every N requests — and grange's own server does not call it at all.
+//
+// CONTRACT, and it is sharper than it looks: this frees the arena, so it
+// invalidates everything the CALLER is still holding too, not just grange's
+// internals. A string read out of a query before the reset is garbage after it.
+// Call it at a point where nothing is in flight: after the response is written,
+// with no parked watchers (they hold collection names) and no staged writes.
 func gr_reset() (ok) {
     ok = 0
     if g_pend_recs > 0 {
@@ -268,6 +277,17 @@ func gr_reset() (ok) {
     g_rvals = make(map[string][]float)
     g_rids = make(map[string][]string)
     g_rdirty = make(map[string]int)
+    // The cold count cache holds the db/coll names it was computed for. Those
+    // are pointers into the arena this function is about to free, so leaving
+    // them would make the next count compare against freed memory — and worse,
+    // could return a stale count for a collection that no longer exists.
+    // Found by reading how poche uses grange: it calls gr_reset() every N
+    // requests, so it would have hit this and grange's own server would not,
+    // because grange never calls gr_reset at all.
+    g_cc_db = ""
+    g_cc_coll = ""
+    g_cc_seq = 0 - 1
+    g_cc_val = 0
     R_loaded = make(map[string]int)
     R_mem = make(map[string]map[string]string)
     R_gen = make(map[string]int)

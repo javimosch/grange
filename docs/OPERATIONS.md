@@ -757,3 +757,61 @@ compactions:
 So a repeated count now costs little more than the request itself, and the scan
 is paid once per write batch rather than once per request. Counts verified
 correct in both states (10000, then 10100 after 100 writes).
+
+## grange as a library: the poche contract
+
+grange has two consumers and only one speaks HTTP. **poche**, an agent-first
+headless CMS, compiles grange's engine modules directly into its own binary and
+calls `gr_use`/`gr_put`/`q_find` in-process — its own README describes the stack
+as "poche (CMS) → grange (engine) → machin", and it builds against
+`../grange/src` directly rather than vendoring a copy.
+
+That consumer was broken and nobody noticed. Milestones added cross-module calls
+(`query` → `qcost`, `cold` → `coldindex`/`coldrange`/`coldsort`) until the subset
+poche links stopped compiling at all:
+
+    error: [undefined-field] cold_flush: undefined variable "g_cifields"
+
+Nothing in the gate compiles a subset, because grange always builds all of
+itself. `scripts/embed_test.sh` (`make embed`) now pins the contract: the
+embeddable core must compile alone, and must work driven as a library — open,
+write, index, count, ordered query, and `gr_reset()` in a loop. poche's build
+list and this harness's `CORE` list are the same set, and drift now fails here
+instead of silently in poche.
+
+### What each side owes the other
+
+**poche → grange.** poche solved a problem grange documented as unsolved. Its
+serve loop calls `gr_reset()` every N requests to keep RSS flat — grange HAS
+`gr_reset()` (registry.src) and never calls it. M37 concluded the per-request
+baseline was bounded only by the RSS watchdog restarting the process; poche's
+answer is gentler and lives inside the same engine. Adopting it in `grange serve`
+is a candidate milestone, gated on the same conditions poche uses.
+
+**grange → poche.** poche hand-rolls what grange now does natively:
+`query_page.src` sorts candidate ids in memory (`query_sort_ids`) and paginates
+by OFFSET. grange has ordered queries on a range index (M33) and keyset
+pagination (M35). The offset approach has exactly the defect M35 documents — a
+row inserted before your position shows one document twice, a deletion skips one
+— and the in-memory sort is the cost keyset pagination avoids. poche also
+predates fsync durability (M30), the cold `find --limit` over-return bug (M32),
+and query cost accounting (M31).
+
+### gr_reset() invalidates the CALLER's values too
+
+Writing the harness demonstrated the contract by breaking it. The first version
+compared a count read BEFORE the reset against one read after, and printed:
+
+    FAIL: count changed after reset: 60 != 0<garbage>
+
+`gr_reset()` frees the arena, so anything the caller still holds dangles — not
+just grange's internals. Call it where nothing is in flight: after the response
+is written, with no parked watchers and no staged writes. poche does exactly
+that; the requirement was simply never written down. It is now, on the function.
+
+One related change, described honestly: `gr_reset()` did not clear the M37 cold
+count cache, which holds the db and collection names it was computed for — so
+the next count compared against freed memory. That is undefined behaviour and is
+now fixed, but I could NOT construct a case where it returned a wrong answer:
+the cache's sequence guard rejected every scenario I tried, including opening a
+different collection after a reset. Hygiene, not a demonstrated bug.

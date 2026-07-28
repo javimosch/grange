@@ -29,6 +29,9 @@ durability: build
 isolation: build
 	./scripts/isolation_test.sh ./$(BIN)
 
+embed:
+	./scripts/embed_test.sh
+
 retention: build
 	./scripts/retention_test.sh ./$(BIN)
 
@@ -49,9 +52,9 @@ fuzz: build
 	./scripts/fuzz_cold.sh 1200 6
 	python3 scripts/fuzz_replica.py 150 3
 
-verify: check test routes durability isolation pagination indexbuild retention soak bench crash fuzz
+verify: check test embed routes durability isolation pagination indexbuild retention soak bench crash fuzz
 
 clean:
 	rm -f $(BIN) $(BIN).mfl
 
-.PHONY: build check test routes durability isolation pagination indexbuild retention soak bench crash verify clean
+.PHONY: build check test embed routes durability isolation pagination indexbuild retention soak bench crash verify clean
