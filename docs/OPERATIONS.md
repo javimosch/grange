@@ -437,3 +437,64 @@ id is now marked seen only when its entry is ACCEPTED.
 
 It also flagged tie order differing between hot and cold, which is what prompted
 making ties a total order rather than papering over it in the harness.
+
+## M34: the second request
+
+M33 shipped an ordered-query crash. One ordered query worked perfectly; the
+SECOND one segfaulted the server, deterministically, on any hot collection whose
+sorted projection had not yet been built in that process.
+
+The cause is a memory-lifetime bug that safe MFL is currently able to express.
+`rb_ensure` builds the sorted projection into whatever arena is current and
+stores it in a GLOBAL. The `/find` handler wraps the query in a per-request
+`arena { }` — deliberately, so page reads and response strings are reclaimed —
+so a projection built inside that block was freed when the request ended, and
+the next request read freed memory.
+
+`q_warm` exists precisely to build such state BEFORE the arena, and it warms the
+fields named in a `where` clause. `order=` was a new way to reach a range index
+that never went through it. The fix is one call (`ord_warm`) before the arena.
+
+### Why the whole gate missed it
+
+Every existing harness is blind to this shape:
+
+  · the unit suites and both fuzzes call the query functions in-process, with
+    no request arena around them at all
+  · routes_test.sh makes ONE request per route, then tears the server down
+  · isolation / durability / caps each start a fresh server for their own check
+
+Nothing anywhere issued the same request TWICE against one process. That is the
+signature of every arena/global lifetime bug — the class a single long-lived
+actor is most exposed to.
+
+`scripts/soak_test.sh` (`make soak`) closes it: one server, every route, four
+rounds, with writes in between, asserting the server stays alive and that
+identical calls give identical answers. Two details are load-bearing, both found
+by watching the harness FAIL to catch the bug it was written for:
+
+1. **It restarts the server mid-run.** Lazily-built state is already warm in the
+   process that declared the index, so a single-process soak silently tests the
+   easy path. After a restart, the first query is the one that BUILDS it. The
+   RSS watchdog restarts this server in production, so this is the normal case.
+2. **It issues a cold-start ordered query explicitly, first.** Relying on route
+   order hid the bug entirely: a range `where` query earlier in the list warms
+   the projection outside any arena.
+
+With the fix reverted, the harness now reports `Segmentation fault` and names
+the request that caused it.
+
+### Upstream
+
+machin's ARENA001 is meant to catch exactly this, and does — but only when the
+assignment is lexically inside the arena block. Moved one function call deeper
+it is silent, and the program returns wrong data with exit 0. Filed as
+machin#539 with a minimal repro. `escape()`, the tool for promoting a value out
+of an arena, is only valid lexically inside an arena block, so a callee cannot
+defend itself; caller discipline is the only defence available today.
+
+Audited the rest of grange for the same shape: `/find`, `/count` and `/agg` all
+warm before their arena. `q_warm`'s condition was tightened to match the one the
+query path uses to WANT the projection — it previously required an extra
+`ix_is_indexed` conjunct, so two predicates in two files had to stay in
+agreement with a use-after-free as the penalty for drift.

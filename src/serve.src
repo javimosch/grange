@@ -262,6 +262,8 @@ func srv_handle(req) (res) {
         // field instead of an arbitrary n — the query a dashboard asks
         ofield, odesc := ord_parse(query(req, "order"), query(req, "desc"))
         if len(ofield) > 0 {
+            // outside the arena: the projection it may build is stored globally
+            ord_warm(ofield)
             ook := 0
             owhy := ""
             arena {

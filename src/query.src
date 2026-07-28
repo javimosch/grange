@@ -130,12 +130,26 @@ func wh_candidates(fields, ops, vals) (ids, mode) {
 // that the query proper allocates nothing the caller must keep. Call it before
 // wrapping a query in arena { }: inside the block those steps then find nothing
 // to do, so no arena-allocated value ends up in a global (which would dangle).
+// q_warm builds any lazily-built projection a query might need, BEFORE the
+// caller wraps the query in a scoped arena.
+//
+// This is load-bearing, not an optimisation: rb_ensure stores the projection in
+// a global, so building it inside a request's arena leaves that global dangling
+// when the request ends and the NEXT request reads freed memory. machin's
+// ARENA001 cannot see this — the assignment happens a call deeper than the
+// arena block (machin#539) — so the discipline is only enforced here.
+//
+// The condition must match the one the QUERY path uses to decide it wants the
+// projection (rb_usable / ord_ready: g_ikind == "range"). It previously also
+// required ix_is_indexed, which is implied by having a kind at all — two
+// predicates in two files that had to agree, with a use-after-free as the
+// penalty if they ever drifted. One predicate now.
 func q_warm(wh) {
     gr_sweep_expired()
     fields, ops, vals := wh_pairs(wh)
     i := 0
     while i < len(fields) {
-        if g_cold == 0 && ix_is_indexed(fields[i]) == 1 && g_ikind[fields[i]] == "range" { rb_ensure(fields[i]) }
+        if g_cold == 0 && g_ikind[fields[i]] == "range" { rb_ensure(fields[i]) }
         i = i + 1
     }
 }

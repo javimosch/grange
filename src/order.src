@@ -78,6 +78,22 @@ func ord_span_clauses(fields, ops, vals, ofield) (sf, so, sv) {
     }
 }
 
+// ord_warm builds the projection BEFORE the caller's scoped arena.
+//
+// rb_ensure allocates the sorted projection into whatever arena is current and
+// stores it in a GLOBAL. Building it inside a request's `arena { }` therefore
+// leaves g_rids/g_rvals pointing at memory that is freed when the request ends,
+// and the NEXT request reads freed memory — the server died on the second
+// ordered query, deterministically, while a single one looked perfect.
+//
+// q_warm already does this for fields named in a where clause. An ordering
+// field is a second way to touch a range index, and needed the same treatment.
+func ord_warm(field) {
+    if g_cold == 1 { return }
+    if len(field) == 0 { return }
+    if g_ikind[field] == "range" { rb_ensure(field) }
+}
+
 // ---- hot ----
 
 // ord_find_hot walks the sorted projection in the requested direction, matching
