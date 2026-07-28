@@ -53,6 +53,11 @@ kb() { local n=300 b a; b=$(rss); for _ in $(seq 1 $n); do curl -s "http://local
 
 seed small 1000
 seed big 20000
+# ...and a COLD collection. The first version of this harness tested only hot
+# collections, so a fix measured as "71 kB -> 10 kB" was still 82 kB per request
+# on the deployed workload, which is cold. Test the shape production runs.
+curl -s -X POST "http://localhost:$PORT/cold?coll=chill" -H "$A" >/dev/null
+seed chill 20000
 # declare the indexes a real deployment would have: an unindexed clause is a
 # SCAN, and a scan legitimately allocates per document it examines. Measuring
 # scans here would be measuring the scan, not the per-request overhead.
@@ -63,6 +68,11 @@ done
 
 SMALL=$(kb "/count?coll=small")
 BIG=$(kb "/count?coll=big")
+COLD=$(kb "/count?coll=chill")
+echo "  unfiltered count on a COLD collection of 20k: ${COLD} kB/request"
+python3 -c "import sys; sys.exit(0 if $COLD <= max(4, $SMALL) * 3 else 1)" \
+  && check "an unfiltered count on cold storage does not read the collection" 1 \
+  || check "an unfiltered count on cold storage does not read the collection (${COLD} kB)" 0
 echo "  unfiltered count: ${SMALL} kB/request over 1k docs, ${BIG} kB/request over 20k docs"
 # 20x the documents must not mean materially more memory per request. 3x is a
 # wide margin: the regression this guards against was 7x on 20x the data.
@@ -70,7 +80,7 @@ python3 -c "import sys; sys.exit(0 if $BIG <= max(4, $SMALL) * 3 else 1)" \
   && check "an unfiltered count does not scale with collection size" 1 \
   || check "an unfiltered count does not scale with collection size (${SMALL} -> ${BIG} kB)" 0
 
-for probe in "/health" "/count?coll=big&where=site%3Da.io" "/get?coll=big&id=k5" "/find?coll=big&where=site%3Da.io&limit=20" "/find?coll=big&limit=10&order=-ts" "/stats?coll=big"; do
+for probe in "/health" "/count?coll=chill" "/get?coll=chill&id=k5" "/count?coll=big&where=site%3Da.io" "/get?coll=big&id=k5" "/find?coll=big&where=site%3Da.io&limit=20" "/find?coll=big&limit=10&order=-ts" "/stats?coll=big"; do
   K=$(kb "$probe")
   [ "$K" -le "$CEILING_KB" ] && check "under ${CEILING_KB}kB/request: $probe (${K}kB)" 1 \
                              || check "under ${CEILING_KB}kB/request: $probe (${K}kB)" 0

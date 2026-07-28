@@ -681,3 +681,34 @@ expecting more.
 Also fixed: `/stats` reported `rss_kb` on cold collections but not hot ones, so
 an operator watching a hot deployment had no memory signal from the API. It
 reports it on both now — the omission cost a measurement during this milestone.
+
+### The same bug on the branch production actually uses
+
+The fix above was measured on a HOT collection, deployed, and then measured on
+the live server — where an unfiltered count still retained **82 kB per request**.
+The hosted workload is COLD, and `cold_count_all()` read every page group to
+count. Fixing the hot branch and validating it on hot data left the deployed
+path untouched.
+
+A stable cold collection (one run, nothing unflushed, no tombstones) has every
+id exactly once and its manifest already records how many, so the count is
+arithmetic with zero page reads: **82 kB -> 2 kB per request**. Anything else
+falls back to the scan, because ids can be shadowed across runs or deleted and
+summing manifests would overcount.
+
+The first version of that shortcut used the manifest's `count`, and the hot/cold
+differential fuzz rejected it on the second operation: cold said 1 where hot
+said 0. A flushed run stores tombstones as RECORDS, so `count` includes deleted
+documents. Manifests now carry a separate `live` figure, written by all three
+paths that produce a run. Old manifests have no such field, are read as -1, and
+fall back to scanning — verified against a database written by the previous
+binary.
+
+That introduced the hazard machin's Falsifier warned about in M36: two parallel
+arrays that must agree. Every site that appends or resets the run counts now
+does both, and the shortcut additionally refuses to use `live` unless its length
+matches the run list — so a future missed site degrades to a scan instead of
+answering with a stale number.
+
+`scripts/retention_test.sh` now measures a COLD collection too. Testing only the
+hot shape is what let an 8x regression reach production in the first place.

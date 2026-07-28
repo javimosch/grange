@@ -20,6 +20,10 @@ var g_tomb = make(map[string]int)
 var g_run_rid = []int{}
 var g_run_pages = []int{}
 var g_run_count = []int{}
+// live documents in each run (records minus tombstones). -1 when the manifest
+// predates the field, which makes the O(1) count fall back to scanning rather
+// than answering from a number it cannot trust.
+var g_run_live = []int{}
 
 func cold_hash(id) (h) {
     h = 2166136261
@@ -50,6 +54,7 @@ func cold_load_runs() {
     g_run_rid = []int{}
     g_run_pages = []int{}
     g_run_count = []int{}
+    g_run_live = []int{}
     g_run_fields = []string{}
     g_run_iparts = []int{}
     entries := list_dir(gr_dir())
@@ -75,6 +80,8 @@ func cold_load_runs() {
                 g_run_rid = append(g_run_rid, rids[i])
                 g_run_pages = append(g_run_pages, parse_int(pv))
                 g_run_count = append(g_run_count, parse_int(cv))
+                lv, lverr := json_get(lines[1], ".live")
+                if len(lverr) == 0 { g_run_live = append(g_run_live, parse_int(lv)) } else { g_run_live = append(g_run_live, 0 - 1) }
                 g_run_fields = append(g_run_fields, wh_unquote(fv))
                 iv, iverr := json_get(lines[1], ".iparts")
                 if len(iverr) == 0 { g_run_iparts = append(g_run_iparts, parse_int(iv)) } else { g_run_iparts = append(g_run_iparts, cold_idx_parts()) }
@@ -128,7 +135,7 @@ func cold_flush() (ok) {
     }
     meta := []string{}
     meta = append(meta, "p|meta")
-    meta = append(meta, "{\"pages\":" + str(pcount) + ",\"count\":" + str(total) + ",\"fields\":\"" + join(g_cifields, ",") + "\",\"iparts\":" + str(cold_idx_parts()) + "}")
+    meta = append(meta, "{\"pages\":" + str(pcount) + ",\"count\":" + str(total) + ",\"live\":" + str(len(ids)) + ",\"fields\":\"" + join(g_cifields, ",") + "\",\"iparts\":" + str(cold_idx_parts()) + "}")
     if gr_write_recfile(gr_dir() + "/" + cold_meta_name(rid), meta, 1) == 0 { ok = 0  return }
     // manifest-last: the pages are already durable (gr_write_recfile syncs
     // content), and this makes the manifest that names them durable too. A crash
@@ -146,6 +153,7 @@ func cold_flush() (ok) {
     g_run_rid = append(g_run_rid, rid)
     g_run_pages = append(g_run_pages, pcount)
     g_run_count = append(g_run_count, total)
+    g_run_live = append(g_run_live, len(ids))
     g_run_fields = append(g_run_fields, join(g_cifields, ","))
     g_run_iparts = append(g_run_iparts, cold_idx_parts())
     // memtable is now redundant with the run: clear it and its WAL chunks
@@ -269,6 +277,24 @@ func cold_maxp() (p) {
 // cold_count_all streams every page group (RAM = one group at a time).
 func cold_count_all() (n) {
     n = 0
+    // A stable collection (one run, nothing unflushed, no tombstones) has every
+    // id exactly once, and the manifest already records how many — so the count
+    // is arithmetic, with zero page reads. Otherwise ids can be shadowed across
+    // runs or deleted, and summing manifests would overcount, so the scan below
+    // is the only exact answer.
+    //
+    // This is the production shape: an unfiltered count on the live cold mirror
+    // was reading the whole collection, retaining 82 kB per request. M37 fixed
+    // the equivalent on the HOT branch and measured it on a hot collection —
+    // the deployed workload is cold, and went unmeasured until it was deployed.
+    if cold_stable() == 1 && len(g_run_live) == len(g_run_rid) && len(g_run_live) > 0 && g_run_live[0] >= 0 {
+        // live, not count: a flushed run stores tombstones as RECORDS, so
+        // `count` includes deleted documents. The hot/cold oracle caught that
+        // immediately — cold said 1 where hot said 0 after a delete was
+        // flushed.
+        n = g_run_live[0]
+        return
+    }
     maxp := cold_maxp()
     k := 0
     while k < maxp {
@@ -325,7 +351,7 @@ func cold_compact() (ok) {
     }
     meta := []string{}
     meta = append(meta, "p|meta")
-    meta = append(meta, "{\"pages\":" + str(newp) + ",\"count\":" + str(written) + ",\"fields\":\"" + join(g_cifields, ",") + "\",\"iparts\":" + str(cold_idx_parts()) + "}")
+    meta = append(meta, "{\"pages\":" + str(newp) + ",\"count\":" + str(written) + ",\"live\":" + str(written) + ",\"fields\":\"" + join(g_cifields, ",") + "\",\"iparts\":" + str(cold_idx_parts()) + "}")
     if gr_write_recfile(gr_dir() + "/" + cold_meta_name(1), meta, 1) == 0 { g_gen = oldgen  return }
     gr_sync_dir()
     // new gen valid: drop every older artifact
@@ -345,6 +371,7 @@ func cold_compact() (ok) {
     g_run_rid = []int{1}
     g_run_pages = []int{newp}
     g_run_count = []int{written}
+    g_run_live = []int{written}
     g_run_fields = []string{join(g_cifields, ",")}
     g_run_iparts = []int{cold_idx_parts()}
     if cold_build_indexes(1, newp) == 0 { return }
@@ -505,7 +532,7 @@ func cold_bulk_direct(body, rid) (nops) {
     }
     meta := []string{}
     meta = append(meta, "p|meta")
-    meta = append(meta, "{\"pages\":" + str(pcount) + ",\"count\":" + str(nops) + ",\"fields\":\"" + join(g_cifields, ",") + "\",\"iparts\":" + str(cold_idx_parts()) + "}")
+    meta = append(meta, "{\"pages\":" + str(pcount) + ",\"count\":" + str(nops) + ",\"live\":" + str(nops) + ",\"fields\":\"" + join(g_cifields, ",") + "\",\"iparts\":" + str(cold_idx_parts()) + "}")
     // index pages first, manifest LAST: a crash before the manifest leaves an
     // incomplete run that recovery ignores, exactly like a flush
     if len(g_cifields) > 0 {

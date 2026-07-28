@@ -279,6 +279,7 @@ func gr_open(db, coll) (ok, errmsg) {
     g_run_rid = []int{}
     g_run_pages = []int{}
     g_run_count = []int{}
+    g_run_live = []int{}
     g_run_fields = []string{}
     g_run_iparts = []int{}
     g_cifields = []string{}

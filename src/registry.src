@@ -258,6 +258,7 @@ func gr_reset() (ok) {
     g_run_rid = []int{}
     g_run_pages = []int{}
     g_run_count = []int{}
+    g_run_live = []int{}
     g_ifields = []string{}
     g_isums = make(map[string]string)
     g_ikind = make(map[string]string)
