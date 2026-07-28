@@ -93,11 +93,23 @@ func d_observe(probe) (obs) {
     cv, cerr := json_get(cj, ".count")
     rj := q_count("v>=50")
     rv, rerr := json_get(rj, ".count")
+    // a WINDOW (two clauses on one range field). Hot answers it from the sorted
+    // projection and cold from its range index — two entirely different code
+    // paths that must agree exactly (M32).
+    wj := q_count("v>=30,v<70")
+    wv, werr := json_get(wj, ".count")
     tj := q_count("tag=t7")
     tv, terr := json_get(tj, ".count")
     fj := q_find("grp=g1", 0)
     fv, ferr := json_get(fj, ".count")
-    obs = str(gr_count()) + "|" + str(found) + ":" + doc + "|" + cv + "|" + rv + "|" + tv + "|" + fv + "|" + state
+    // a LIMITED find must return min(limit, matches) on cold exactly as on hot.
+    // Cold resolution stops reading pages once the limit is satisfied (M32), and
+    // stopping one page too early would show up here as a short count. The
+    // ORDER may legitimately differ between hot and cold, so only the count is
+    // compared — which is what catches an over-eager early exit.
+    flj := q_find("grp=g1", 3)
+    flv, flerr := json_get(flj, ".count")
+    obs = str(gr_count()) + "|" + str(found) + ":" + doc + "|" + cv + "|" + rv + "|" + wv + "|" + tv + "|" + fv + "|" + flv + "|" + state
 }
 
 func main() {

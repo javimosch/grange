@@ -201,7 +201,7 @@ func q_find(wh, limit) (data) {
     // range fast path: walk only the sorted segment, no per-doc matching
     if rb_usable(fields, ops) == 1 {
         rb_ensure(fields[0])
-        lo, hi := rb_bounds(fields[0], ops[0], vals[0])
+        lo, hi := rb_bounds_all(fields, ops, vals)
         rids := g_rids[fields[0]]
         items := []string{}
         n := 0
@@ -261,7 +261,7 @@ func q_count(wh) (data) {
     // range fast path: two binary searches
     if rb_usable(fields, ops) == 1 {
         rb_ensure(fields[0])
-        lo, hi := rb_bounds(fields[0], ops[0], vals[0])
+        lo, hi := rb_bounds_all(fields, ops, vals)
         data = "{\"count\":" + str(hi - lo) + ",\"mode\":\"range\"" + q_cost_json() + "}"
         return
     }

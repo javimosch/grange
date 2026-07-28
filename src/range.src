@@ -119,11 +119,44 @@ func rb_bounds(f, op, v) (lo, hi) {
     if op == "=" { lo = rb_ge(vals, x)  hi = rb_gt(vals, x) }
 }
 
-// rb_usable: one clause on a range-declared field with a numeric-compare op.
+// rb_usable: every clause is on the SAME range-declared field with a
+// numeric-compare op — one clause (`ts>=A`) or several (`ts>=A,ts<B`).
+//
+// A window used to fall through to a full scan, which made the canonical
+// analytics question ("events in the last 24h") the one query a hot collection
+// answered worst: measured on 20k documents, `ts>=A` was a binary search while
+// `ts>=A,ts<B` examined all 20,000. Cold collections already answered windows
+// through their index, so the in-memory path was slower than the disk one.
+//
+// The fix is only bookkeeping: every clause bounds the SAME sorted projection,
+// so intersecting them is taking the widest lower bound and the narrowest upper
+// bound. Still two binary searches, whatever the clause count.
 func rb_usable(fields, ops) (yes) {
     yes = 0
-    if len(fields) != 1 { return }
-    if g_ikind[fields[0]] != "range" { return }
-    if ops[0] == "=" { return }
+    if len(fields) == 0 { return }
+    f := fields[0]
+    if g_ikind[f] != "range" { return }
+    i := 0
+    while i < len(fields) {
+        if fields[i] != f { return }
+        if ops[i] != ">" && ops[i] != ">=" && ops[i] != "<" && ops[i] != "<=" { return }
+        i = i + 1
+    }
     yes = 1
+}
+
+// rb_bounds_all folds every clause into one [lo, hi) span over the projection.
+func rb_bounds_all(fields, ops, vals) (lo, hi) {
+    lo = 0
+    hi = len(g_rvals[fields[0]])
+    i := 0
+    while i < len(fields) {
+        l, h := rb_bounds(fields[i], ops[i], vals[i])
+        if l > lo { lo = l }
+        if h < hi { hi = h }
+        i = i + 1
+    }
+    // clauses that exclude each other (ts>=9,ts<1) give an empty span, not a
+    // negative one
+    if hi < lo { hi = lo }
 }

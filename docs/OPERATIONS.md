@@ -340,3 +340,53 @@ Note the interaction with cold storage: a cold collection's pages are read from
 disk, so `pages` counts real I/O; a hot collection's `pages` stays 0 and only
 `scanned` grows. A budget expressed in documents therefore behaves consistently
 across both, which is why `GRANGE_MAX_SCAN_DOCS` is the one to set.
+
+## M32: the query planner, checked against its own accounting
+
+M31 made every query report what it cost. M32 is what that visibility found when
+pointed at the workload grange exists for — an analytics time window.
+
+### The README was wrong in both directions
+
+It said "multi-clause range queries scan". Measured:
+
+| query | hot collection | cold collection |
+|---|---|---|
+| `ts>=A` | `range` (binary search) | `cold-index`, 25 pages |
+| `ts>=A,ts<B` | `scan`, 20,000 docs examined | `cold-index-multi`, 28 pages |
+
+So the claim was already stale for cold collections (M28's intersection work
+fixed it and nobody updated the line), and true for hot ones — which is the
+wrong way round: the in-memory path was worse at the canonical analytics
+question than the disk path.
+
+The fix is bookkeeping, not machinery. Every clause on one range field bounds
+the SAME sorted projection, so intersecting them is taking the widest lower
+bound and the narrowest upper bound: `rb_bounds_all` folds any number of clauses
+into one span, and a window stays two binary searches. Hot windows now report
+`mode: range` with 0 documents examined, down from 20,000.
+
+### A limit that was not a limit
+
+`find --limit 5` over a cold window read **120 pages to return 5 documents**.
+Cold resolution groups candidates by page and stops APPENDING at the limit, but
+kept reading every remaining page and discarding what it resolved. Checking the
+limit in the page loop cut data-page reads from ~92 to ~4 (32 pages total, of
+which 28 are the window's index pages). The result set is identical — the same
+documents in the same order — so this is purely a matter of not paying for
+pages whose contents were thrown away.
+
+### And a real bug underneath it
+
+Adding a LIMITED find to the cold-vs-hot differential fuzz immediately failed:
+cold returned 4-6 documents for `--limit 3` where hot returned 3. The memtable
+branch of `cold_idx_resolve` appended candidates with no limit check at all, so
+any cold collection with unflushed matching writes over-returned. Reproduced
+against the pre-M32 binary (6 items for a limit of 3), fixed, and covered by a
+regression test that was confirmed to fail without the fix.
+
+Worth noting how it was found: this bug is invisible to a count (counts must see
+every match, so the limit does not apply), invisible to a hot collection, and
+invisible to any test that only checks the documents it got back are correct —
+they were correct, there were just too many of them. It took an oracle that
+compares two implementations of the same query.

@@ -234,6 +234,42 @@ func uc_bulk_direct() {
     assert_eq_int(found, 0, "delete stays deleted after compaction")
 }
 
+
+// M32: a LIMIT must be honoured across the run/memtable boundary.
+//
+// cold_idx_resolve appended memtable candidates with no limit check at all, so
+// a cold `find --limit N` whose candidates were partly unflushed returned MORE
+// than N documents (measured: 6 for a limit of 3) while a hot collection
+// returned exactly N. Found by the cold-vs-hot differential fuzz after it
+// started observing a limited find.
+func uc_limit_across_runs_and_memtable() {
+    db := uc_dir()
+    uc_seed(db, "c", 120)
+    cok, cerr := gr_cold_enable()
+    assert_eq_int(cok, 1, "cold enabled")
+    assert_eq_int(cold_flush(), 1, "candidates land in a run")
+    assert_eq_int(gr_index_add("grp", "", ""), 1, "declare cold index")
+    // more matching docs that are still in the memtable, not the run
+    gr_put("m1", "{\"i\":901,\"grp\":\"g1\",\"tag\":\"t901\"}")
+    gr_put("m2", "{\"i\":902,\"grp\":\"g1\",\"tag\":\"t902\"}")
+    gr_put("m3", "{\"i\":903,\"grp\":\"g1\",\"tag\":\"t903\"}")
+    gr_put("m4", "{\"i\":904,\"grp\":\"g1\",\"tag\":\"t904\"}")
+
+    fj := q_find("grp=g1", 3)
+    fc, fcerr := json_get(fj, ".count")
+    assert_eq_str(fc, "3", "limit is honoured with candidates in both run and memtable")
+
+    // a limit larger than the match count returns everything, unchanged
+    fj = q_find("grp=g1", 1000)
+    fc, fcerr = json_get(fj, ".count")
+    assert_eq_str(fc, "34", "a limit above the match count returns them all")
+
+    // and a COUNT still sees every match: limit must not leak into counting
+    cj := q_count("grp=g1")
+    cv, cverr := json_get(cj, ".count")
+    assert_eq_str(cv, "34", "count is unaffected by find limits")
+}
+
 func main() {
     uc_bulk_direct()
     uc_hash_partitioning()
@@ -242,5 +278,6 @@ func main() {
     uc_index_lookup()
     uc_index_exactness()
     uc_index_numeric_and_batch()
+    uc_limit_across_runs_and_memtable()
     test_summary()
 }

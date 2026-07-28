@@ -228,7 +228,15 @@ make verify   # check + tests (69) + 100k bench + crash harness
   crash-safety makes that a non-event. Per-request arena scoping is the next
   engine milestone.
 - Hot collections keep the whole dataset + indexes in memory (memtable = the db); segments make cold open fast, not memory small. Steady-state RSS at 100k docs + 1 index is ~120 MB (fresh process); the bench process peaks at ~440 MB from MFL arena temporaries — a memory diet is the standing target.
-- `--where` supports equality + numeric ranges. Equality clauses use buckets; a single range clause on a `--range` field uses the sorted projection (built lazily on the first range query after a write — the build cost is the first query's, honestly). Multi-clause range queries scan. Aggregate registers cover count/sum/avg; `--minmax` computes min/max on the scan path.
+- `--where` supports equality + numeric ranges. Equality clauses use buckets; range clauses on a
+  `--range` field use the sorted projection (built lazily on the first range query after a write —
+  the build cost is the first query's, honestly). A WINDOW (`ts>=A,ts<B`) folds into one span, so
+  it stays two binary searches; on cold collections the same query goes through the range index
+  (`cold-index-multi`). Clauses on different fields are intersected per-index, then the survivors
+  are resolved. What still scans: a range clause on a field with no `--range` index, and any
+  substring (`~=`) clause. Aggregate registers cover count/sum/avg; `--minmax` computes min/max on
+  the scan path. Every response reports the plan (`mode`) and what it cost (`scanned`, `pages`),
+  so this is checkable rather than trusted.
 - Durability: a commit is fsynced before it is acknowledged — the chunk's content, then the
   directory entry that makes it exist (`make durability` asserts both at the syscall level, and
   that a cold flush syncs every page before the manifest naming it). Process-crash-exact is

@@ -304,6 +304,13 @@ func cold_idx_resolve(cands, fields, ops, vals, limit, countonly) (items, n) {
                 if wh_match(g_mem[id], fields, ops, vals) == 1 {
                     if countonly == 0 { items = append(items, "{\"id\":\"" + jesc(id) + "\",\"doc\":" + g_mem[id] + "}") }
                     n = n + 1
+                    // the memtable branch ignored the limit entirely, so a cold
+                    // `find --limit 3` whose candidates were still unflushed
+                    // returned 4 or 5 documents where a hot collection returned
+                    // 3. Found by the cold-vs-hot differential fuzz once it
+                    // started observing a LIMITED find. countonly is excluded:
+                    // a count must see every match.
+                    if countonly == 0 && limit > 0 && n >= limit { return }
                 }
             } else {
                 pending = append(pending, id)
@@ -328,6 +335,14 @@ func cold_idx_resolve(cands, fields, ops, vals, limit, countonly) (items, n) {
         still := []string{}
         t := 0
         while t < len(touched) {
+            // Stop reading once the limit is satisfied. The inner loop already
+            // refused to append past the limit, so every page read after this
+            // point resolved candidates whose documents were thrown away: a
+            // `find --limit 5` over a 133-candidate window read 120 pages to
+            // return 5 documents. The result set is unchanged — this only stops
+            // paying for it. countonly is excluded: a count must be exact, and
+            // limit does not apply to it.
+            if countonly == 0 && limit > 0 && n >= limit { return }
             k := touched[t]
             body, rok := gr_load_recbody(gr_dir() + "/" + cold_page_name(g_run_rid[r], k))
             pput := make(map[string]string)

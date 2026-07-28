@@ -98,6 +98,24 @@ func ui_range_projection() {
     assert_eq_int(hi - lo, 0, "bound above max is empty")
     lo, hi = rb_bounds("v", "<", "-1")
     assert_eq_int(hi - lo, 0, "bound below min is empty")
+    // M32: a WINDOW folds every clause into one span, so it stays two binary
+    // searches instead of falling through to a scan
+    wf := []string{"v", "v"}
+    wo := []string{">=", "<"}
+    wv := []string{"10", "20"}
+    assert_eq_int(rb_usable(wf, wo), 1, "two clauses on one range field are usable")
+    lo, hi = rb_bounds_all(wf, wo, wv)
+    assert_eq_int(hi - lo, 10, "window counts 10..19")
+    // an empty span, not a negative one, when the clauses exclude each other
+    lo, hi = rb_bounds_all(wf, []string{">=", "<"}, []string{"40", "10"})
+    assert_eq_int(hi - lo, 0, "contradictory window is empty")
+    // three clauses fold too, narrowest wins on each side
+    lo, hi = rb_bounds_all([]string{"v", "v", "v"}, []string{">=", ">=", "<"}, []string{"10", "15", "20"})
+    assert_eq_int(hi - lo, 5, "widest lower bound and narrowest upper bound win")
+    // clauses on DIFFERENT fields must not be folded into one projection
+    assert_eq_int(rb_usable([]string{"v", "grp"}, []string{">=", "<"}), 0, "mixed fields are not usable")
+    // nor an equality/substring op, which the projection cannot answer
+    assert_eq_int(rb_usable([]string{"v", "v"}, []string{">=", "="}), 0, "equality clause is not usable")
     // a write invalidates and the next query rebuilds with the new doc
     gr_put("extra", "{\"v\":999}")
     gr_commit()
