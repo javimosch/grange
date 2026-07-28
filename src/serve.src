@@ -258,6 +258,29 @@ func srv_handle(req) (res) {
         // the query reads pages and builds strings that die with the response;
         // only the body escapes, so the loop's arena stays flat (machin escape())
         body := ""
+        // ?order=<field> (or order=-field) returns the FIRST/LAST n by that
+        // field instead of an arbitrary n — the query a dashboard asks
+        ofield, odesc := ord_parse(query(req, "order"), query(req, "desc"))
+        if len(ofield) > 0 {
+            ook := 0
+            owhy := ""
+            arena {
+                d, k, w := q_find_ordered(wh, limit, ofield, odesc)
+                body = escape(d)
+                ook = k
+                owhy = escape(w)
+            }
+            if ook == 0 {
+                res = srv_err("400 Bad Request", "input", owhy)
+                return
+            }
+            if q_aborted() == 1 {
+                res = srv_err("400 Bad Request", "input", q_budget_msg(srv_where_fields(wh)))
+                return
+            }
+            res = srv_ok(body)
+            return
+        }
         arena { body = escape(q_find(wh, limit)) }
         if q_aborted() == 1 {
             res = srv_err("400 Bad Request", "input", q_budget_msg(srv_where_fields(wh)))

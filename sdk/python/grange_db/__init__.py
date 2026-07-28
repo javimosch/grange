@@ -86,9 +86,16 @@ class Grange:
     def delete(self, id):
         self._req("POST", "/del", {"db": self._db, "coll": self._coll, "id": id})
 
-    def find(self, where="", limit=100):
-        """where: "f=v,f2>=v2" (ANDed; = > < >= <=). -> {count, mode, items}"""
-        return self._req("GET", f"/find?{self._qs}&where={_up.quote(where)}&limit={limit}")
+    def find(self, where="", limit=100, order="", desc=False):
+        """where: "f=v,f2>=v2" (ANDed; = > < >= <=). -> {count, mode, items}
+
+        order: a --range-indexed field to order by; desc=True for newest/highest
+        first. Without an order a limit returns an arbitrary subset, not the top N.
+        """
+        q = f"/find?{self._qs}&where={_up.quote(where)}&limit={limit}"
+        if order:
+            q += f"&order={_up.quote(order)}" + ("&desc=1" if desc else "")
+        return self._req("GET", q)
 
     def count(self, where=""):
         return self._req("GET", f"/count?{self._qs}&where={_up.quote(where)}")["count"]

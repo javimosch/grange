@@ -143,11 +143,78 @@ func ui_msort() {
     assert_eq_int(len(zero_v), 0, "msort empty input")
 }
 
+
+// M33: ordered queries. The projection is already sorted, so ordering is a
+// direction plus a limit — these check the contract rather than the mechanism.
+func ui_ordered_queries() {
+    db := "/tmp/grange-ut-ord-" + str(now_ms())
+    ok, errmsg := gr_open(db, "c")
+    i := 0
+    while i < 12 {
+        // two documents share v=5 so the tie-break is exercised
+        v := i
+        if i == 7 { v = 5 }
+        gr_put("k" + str(i), "{\"v\":" + str(v) + ",\"grp\":\"g" + str(i % 2) + "\"}")
+        i = i + 1
+    }
+    gr_commit()
+
+    // ordering needs a range index, and the refusal names the fix
+    rdy, why := ord_ready("v")
+    assert_eq_int(rdy, 0, "no ordering before the index is declared")
+    saw := 0
+    if index(why, "--range") > 0 { saw = 1 }
+    assert_eq_int(saw, 1, "refusal names the command that fixes it")
+
+    assert_eq_int(gr_index_add("v", "", "range"), 1, "declare range index")
+    rdy, why = ord_ready("v")
+    assert_eq_int(rdy, 1, "ordering ready once declared")
+
+    // descending returns the HIGHEST values, which is the whole point
+    d, dok, dwhy := q_find_ordered("", 3, "v", 1)
+    dc, dcerr := json_get(d, ".count")
+    assert_eq_str(dc, "3", "desc returns the limit")
+    v0, v0err := json_get(d, ".items[0].doc.v")
+    v1, v1err := json_get(d, ".items[1].doc.v")
+    v2, v2err := json_get(d, ".items[2].doc.v")
+    assert_eq_str(v0, "11", "highest first")
+    assert_eq_str(v1, "10", "then next highest")
+    assert_eq_str(v2, "9", "and the third")
+
+    // ascending returns the lowest
+    a, aok, awhy := q_find_ordered("", 2, "v", 0)
+    av0, av0err := json_get(a, ".items[0].doc.v")
+    assert_eq_str(av0, "0", "asc starts at the lowest")
+
+    // a window bounds the span, and ordering applies WITHIN it
+    w, wok, wwhy := q_find_ordered("v>=3,v<6", 2, "v", 1)
+    wc, wcerr := json_get(w, ".count")
+    assert_eq_str(wc, "2", "window + limit")
+    wv0, wv0err := json_get(w, ".items[0].doc.v")
+    assert_eq_str(wv0, "5", "highest inside the window, not the collection")
+
+    // ties are a total order: equal values sort by id, so the sequence is
+    // reproducible rather than incidental
+    t, tok, twhy := q_find_ordered("v>=5,v<6", 10, "v", 0)
+    tc, tcerr := json_get(t, ".count")
+    assert_eq_str(tc, "2", "both tied documents returned")
+    tid0, tid0err := json_get(t, ".items[0].id")
+    tid1, tid1err := json_get(t, ".items[1].id")
+    assert_eq_str(tid0, "\"k5\"", "tie broken by id, lowest first")
+    assert_eq_str(tid1, "\"k7\"", "then the next id")
+
+    // a non-ordering clause still filters
+    f, fok, fwhy := q_find_ordered("grp=g0", 3, "v", 1)
+    fv0, fv0err := json_get(f, ".items[0].doc.v")
+    assert_eq_str(fv0, "10", "highest v among grp=g0 only")
+}
+
 func main() {
     ui_fstr()
     ui_tokens()
     ui_buckets_and_registers()
     ui_range_projection()
     ui_msort()
+    ui_ordered_queries()
     test_summary()
 }

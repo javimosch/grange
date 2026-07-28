@@ -1,0 +1,281 @@
+// grange ordered queries — "the latest N", which is the query a dashboard
+// actually asks and the one grange could not express.
+//
+// M32 made `limit` cheap, but a limit without an order returns an ARBITRARY
+// subset: `find ts>=A,ts<B --limit 5` handed back the five EARLIEST events in
+// the window, and there was no way to ask for the five latest. A caller wanting
+// recent activity had to fetch the whole window and sort it themselves — the
+// one thing an agent-first database should never make its caller do.
+//
+// No new index is needed, because both storage modes already keep the data
+// sorted for range queries:
+//
+//   hot  — g_rids[field] is the projection, already ascending. An ordered query
+//          is the same [lo,hi) span walked forwards or backwards.
+//   cold — a range index is sorted pages plus min/max boundaries. Collect the
+//          (value, id) pairs the span can contain, sort them once, then resolve
+//          in order and stop at the limit.
+//
+// Ordering therefore REQUIRES a range index on the ordering field. That is a
+// real constraint, and the error says so and names the command that fixes it
+// rather than reporting a bare failure.
+//
+// Staleness: an id can appear in several runs' indexes with different values if
+// it was updated. Sorting by an old value would place it wrong, so after
+// resolving a candidate its CURRENT value is compared against the index value
+// it was sorted by, and a mismatch is skipped — the newer run indexed the newer
+// value, so the document appears at its correct position from that entry.
+
+// ord_parse accepts order=ts with a separate desc flag, or the order=-ts
+// shorthand that a caller can put in a single query parameter.
+func ord_parse(spec, descflag) (field, desc) {
+    field = trim(spec)
+    desc = 0
+    if descflag == "1" || descflag == "true" { desc = 1 }
+    if has_prefix(field, "-") {
+        desc = 1
+        field = substr(field, 1, len(field))
+    }
+}
+
+// ord_ready reports whether `field` can be ordered on in the current mode, and
+// if not, why — the message names the command that makes it possible.
+func ord_ready(field) (yes, why) {
+    yes = 0
+    why = ""
+    if len(field) == 0 { return }
+    if g_cold == 1 {
+        if cold_is_range(field) == 1 && cold_idx_ready(field) == 1 {
+            yes = 1
+            return
+        }
+        why = "ordering by \"" + field + "\" needs a range index on this cold collection — declare one with: grange index --field " + field + " --range"
+        return
+    }
+    if g_ikind[field] == "range" {
+        yes = 1
+        return
+    }
+    why = "ordering by \"" + field + "\" needs a range index — declare one with: grange index --field " + field + " --range"
+}
+
+// ord_span_clauses picks out the range clauses on the ordering field: those
+// bound how much of the sorted structure has to be looked at at all.
+func ord_span_clauses(fields, ops, vals, ofield) (sf, so, sv) {
+    sf = []string{}
+    so = []string{}
+    sv = []string{}
+    i := 0
+    while i < len(fields) {
+        if fields[i] == ofield {
+            if ops[i] == ">" || ops[i] == ">=" || ops[i] == "<" || ops[i] == "<=" {
+                sf = append(sf, fields[i])
+                so = append(so, ops[i])
+                sv = append(sv, vals[i])
+            }
+        }
+        i = i + 1
+    }
+}
+
+// ---- hot ----
+
+// ord_find_hot walks the sorted projection in the requested direction, matching
+// every clause and stopping at the limit. Cost is O(log n) for the span plus
+// one match per document actually returned — the whole point of ordering on an
+// already-sorted structure.
+func ord_find_hot(fields, ops, vals, limit, ofield, desc) (items, n) {
+    items = []string{}
+    n = 0
+    rb_ensure(ofield)
+    rids := g_rids[ofield]
+    lo := 0
+    hi := len(rids)
+    sf, so, sv := ord_span_clauses(fields, ops, vals, ofield)
+    if len(sf) > 0 { lo, hi = rb_bounds_all(sf, so, sv) }
+    i := lo
+    if desc == 1 { i = hi - 1 }
+    while true {
+        if desc == 1 {
+            if i < lo { return }
+        } else {
+            if i >= hi { return }
+        }
+        if limit > 0 && n >= limit { return }
+        id := rids[i]
+        doc := g_mem[id]
+        q_cost_docs(1)
+        if len(doc) > 0 {
+            if wh_match(doc, fields, ops, vals) == 1 {
+                items = append(items, "{\"id\":\"" + jesc(id) + "\",\"doc\":" + doc + "}")
+                n = n + 1
+            }
+        }
+        if desc == 1 { i = i - 1 } else { i = i + 1 }
+    }
+}
+
+// ---- cold ----
+
+// ord_cold_pairs collects the (value, id) pairs the span can contain, reading
+// only the index pages whose recorded min/max overlaps it, and returns them
+// sorted ascending. Honest cost: this materialises the SPAN's index entries, so
+// ordering a bounded window is cheap and ordering an unbounded one is
+// proportional to the collection — bound the window, or set a scan budget.
+func ord_cold_pairs(ofield, sf, so, sv) (ovals, oids) {
+    vals := []float{}
+    ids := []string{}
+    r := 0
+    while r < len(g_run_rid) {
+        rid := g_run_rid[r]
+        mbody, mok := gr_load_recbody(gr_dir() + "/" + cold_rng_meta_name(rid, ofield))
+        if mok == 1 {
+            pos := 0
+            while true {
+                kline, knext, kmore := gr_next_line(mbody, pos)
+                if kmore == 0 { break }
+                pos = knext
+                if has_prefix(kline, "p|") {
+                    jline, jnext, jmore := gr_next_line(mbody, pos)
+                    if jmore == 0 { break }
+                    pos = jnext
+                    k := parse_int(substr(kline, 2, len(kline)))
+                    mn, mnerr := json_get(jline, ".min")
+                    mx, mxerr := json_get(jline, ".max")
+                    want := 1
+                    if len(mnerr) == 0 && len(mxerr) == 0 {
+                        pmin := parse_float(mn)
+                        pmax := parse_float(mx)
+                        c := 0
+                        while c < len(sf) {
+                            if cold_rng_overlaps(pmin, pmax, so[c], parse_float(sv[c])) == 0 { want = 0 }
+                            c = c + 1
+                        }
+                    }
+                    if want == 1 {
+                        pbody, pok := gr_load_recbody(gr_dir() + "/" + cold_rng_name(rid, ofield, k))
+                        if pok == 1 {
+                            ppos := 0
+                            while true {
+                                vln, vnext, vmore := gr_next_line(pbody, ppos)
+                                if vmore == 0 { break }
+                                ppos = vnext
+                                if has_prefix(vln, "p|") {
+                                    idln, inext, imore := gr_next_line(pbody, ppos)
+                                    if imore == 0 { break }
+                                    ppos = inext
+                                    v := parse_float(substr(vln, 2, len(vln)))
+                                    keep := 1
+                                    c := 0
+                                    while c < len(sf) {
+                                        if cold_rng_matches(v, so[c], parse_float(sv[c])) == 0 { keep = 0 }
+                                        c = c + 1
+                                    }
+                                    if keep == 1 {
+                                        vals = append(vals, v)
+                                        ids = append(ids, idln)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        r = r + 1
+    }
+    // the memtable is not in any run's index, so its matching documents are
+    // added here — otherwise a just-written document could never be the latest
+    mids := keys(g_mem)
+    i := 0
+    while i < len(mids) {
+        tok := ix_field_tok(g_mem[mids[i]], ofield)
+        if len(tok) > 0 {
+            v := ix_tok_num(tok)
+            keep := 1
+            c := 0
+            while c < len(sf) {
+                if cold_rng_matches(v, so[c], parse_float(sv[c])) == 0 { keep = 0 }
+                c = c + 1
+            }
+            if keep == 1 {
+                vals = append(vals, v)
+                ids = append(ids, mids[i])
+            }
+        }
+        i = i + 1
+    }
+    ovals, oids = rb_msort(vals, ids)
+}
+
+func ord_find_cold(fields, ops, vals, limit, ofield, desc) (items, n) {
+    items = []string{}
+    n = 0
+    sf, so, sv := ord_span_clauses(fields, ops, vals, ofield)
+    pv, pid := ord_cold_pairs(ofield, sf, so, sv)
+    seen := make(map[string]int)
+    i := 0
+    if desc == 1 { i = len(pid) - 1 }
+    while true {
+        if desc == 1 {
+            if i < 0 { return }
+        } else {
+            if i >= len(pid) { return }
+        }
+        if limit > 0 && n >= limit { return }
+        id := pid[i]
+        if has(seen, id) == false {
+            doc, found := cold_get(id)
+            q_cost_docs(1)
+            if found == 1 {
+                // An id can carry several index entries when it was updated:
+                // the old run's value and the new one. Skip the entry whose
+                // value is no longer current — taking it would order the result
+                // by a stale key — and mark the id seen ONLY on acceptance.
+                //
+                // Marking it seen on the stale entry instead is a real bug the
+                // hot/cold order oracle caught: a document updated from v=65 to
+                // v=57 was consumed by its stale 65 entry and then suppressed at
+                // its correct 57 position, so it vanished from the result.
+                cur := ix_field_tok(doc, ofield)
+                if len(cur) > 0 && ix_tok_num(cur) == pv[i] {
+                    seen[id] = 1
+                    if wh_match(doc, fields, ops, vals) == 1 {
+                        items = append(items, "{\"id\":\"" + jesc(id) + "\",\"doc\":" + doc + "}")
+                        n = n + 1
+                    }
+                }
+            }
+        }
+        if desc == 1 { i = i - 1 } else { i = i + 1 }
+    }
+}
+
+// q_find_ordered is the entry point: returns (data, ok, why). ok=0 means the
+// field cannot be ordered on and `why` says what to declare.
+func q_find_ordered(wh, limit, ofield, desc) (data, ok, why) {
+    data = ""
+    ok = 0
+    q_cost_reset()
+    gr_sweep_expired()
+    ready, reason := ord_ready(ofield)
+    if ready == 0 {
+        why = reason
+        return
+    }
+    ok = 1
+    why = ""
+    fields, ops, vals := wh_pairs(wh)
+    mode := "range-ordered"
+    items := []string{}
+    n := 0
+    if g_cold == 1 {
+        mode = "cold-range-ordered"
+        items, n = ord_find_cold(fields, ops, vals, limit, ofield, desc)
+    } else {
+        items, n = ord_find_hot(fields, ops, vals, limit, ofield, desc)
+    }
+    dir := "asc"
+    if desc == 1 { dir = "desc" }
+    data = "{\"count\":" + str(n) + ",\"mode\":\"" + mode + "\",\"order\":\"" + jesc(ofield) + "\",\"dir\":\"" + dir + "\"" + q_cost_json() + ",\"items\":[" + join(items, ",") + "]}"
+}

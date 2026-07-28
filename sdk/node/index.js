@@ -68,8 +68,12 @@ class Grange {
   }
 
   // where: "f=v,f2>=v2" (ANDed; = > < >= <=). Returns { count, mode, items: [{id, doc}] }.
-  async find(where = '', { limit = 100 } = {}) {
-    return this._req('GET', `/find?${this._qs}&where=${encodeURIComponent(where)}&limit=${limit}`);
+  // order: a --range-indexed field name; desc: newest/highest first. Without an
+  // order a limit returns an arbitrary subset, not the top/latest N.
+  async find(where = '', { limit = 100, order = '', desc = false } = {}) {
+    let q = `/find?${this._qs}&where=${encodeURIComponent(where)}&limit=${limit}`;
+    if (order) q += `&order=${encodeURIComponent(order)}${desc ? '&desc=1' : ''}`;
+    return this._req('GET', q);
   }
 
   async count(where = '') {

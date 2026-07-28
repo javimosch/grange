@@ -237,6 +237,15 @@ make verify   # check + tests (69) + 100k bench + crash harness
   substring (`~=`) clause. Aggregate registers cover count/sum/avg; `--minmax` computes min/max on
   the scan path. Every response reports the plan (`mode`) and what it cost (`scanned`, `pages`),
   so this is checkable rather than trusted.
+- ORDERED queries: `?order=<field>&desc=1` (`--order`/`--desc` on the CLI, `order`/`desc` in every
+  SDK) returns the first or last N BY that field instead of an arbitrary N — "the latest 5 events
+  in this window" is one request, not fetch-everything-and-sort. It needs a `--range` index on the
+  ordering field (both storage modes already keep those sorted, so ordering is a direction plus a
+  limit, not a sort); asking without one is refused with the exact command to declare it. Ties
+  break by id, which makes it a TOTAL order — the same query returns the same sequence on hot and
+  cold, so paginating cannot show a document twice or skip one. Honest cost: on cold, ordering
+  materialises the SPAN's index entries, so bound the window (or set a scan budget) rather than
+  ordering an entire large collection.
 - Durability: a commit is fsynced before it is acknowledged — the chunk's content, then the
   directory entry that makes it exist (`make durability` asserts both at the syscall level, and
   that a cold flush syncs every page before the manifest naming it). Process-crash-exact is

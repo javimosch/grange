@@ -80,6 +80,25 @@ func d_cmp_str(got, want, what, step) {
 // and three query shapes. Probing a single random key was not enough — mutation
 // testing showed a broken run-tombstone path surviving, because only gr_get
 // consults it and one probe per step rarely lands on a resurrected key.
+// d_seq renders an ordered result as "id=doc;id=doc;" — the SEQUENCE, without
+// the cost fields. scanned/pages are implementation-specific by design (hot
+// walks memory, cold reads pages), so comparing the raw response JSON would
+// report a divergence for every ordered query.
+func d_seq(js) (out) {
+    out = ""
+    cv, cerr := json_get(js, ".count")
+    if len(cerr) > 0 { return }
+    n := parse_int(cv)
+    i := 0
+    while i < n {
+        id, iderr := json_get(js, ".items[" + str(i) + "].id")
+        dc, dcerr := json_get(js, ".items[" + str(i) + "].doc")
+        out = out + id + "=" + dc + ";"
+        i = i + 1
+    }
+    out = str(n) + ":" + out
+}
+
 func d_observe(probe) (obs) {
     state := ""
     ki := 0
@@ -109,7 +128,16 @@ func d_observe(probe) (obs) {
     // compared — which is what catches an over-eager early exit.
     flj := q_find("grp=g1", 3)
     flv, flerr := json_get(flj, ".count")
-    obs = str(gr_count()) + "|" + str(found) + ":" + doc + "|" + cv + "|" + rv + "|" + wv + "|" + tv + "|" + fv + "|" + flv + "|" + state
+    // ORDERED find (M33). Every other observable here is a count or a single
+    // document, because an unordered find may legitimately return the same
+    // documents in a different order on cold than on hot. An ORDERED query has
+    // no such freedom: hot walks the sorted projection and cold merges its
+    // sorted index pages, and the two must produce the SAME SEQUENCE. This is
+    // the first observable that compares order, and it compares the documents
+    // themselves, not just how many came back.
+    oj, ook, owhy := q_find_ordered("v>=20,v<80", 4, "v", 1)
+    oaj, oaok, oawhy := q_find_ordered("", 3, "v", 0)
+    obs = str(gr_count()) + "|" + str(found) + ":" + doc + "|" + cv + "|" + rv + "|" + wv + "|" + tv + "|" + fv + "|" + flv + "|" + d_seq(oj) + "|" + d_seq(oaj) + "|" + state
 }
 
 func main() {
@@ -145,6 +173,10 @@ func main() {
         if indexed == 0 && step == nops / 3 {
             ok, errmsg = gr_use(d_db, "hot")
             gr_index_add("grp", "", "")
+            // the hot side needs the ordered index too, or an ORDERED query is
+            // refused there and compared against a cold result that exists —
+            // which is a difference in the HARNESS, not in the engine
+            gr_index_add("v", "", "range")
             ok, errmsg = gr_use(d_db, "cold")
             gr_index_add("grp", "", "")
             gr_index_add("tag", "", "")

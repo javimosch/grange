@@ -151,6 +151,19 @@ func (c *Client) Find(where string, limit int) (*FindResult, error) {
 	return &out, err
 }
 
+// FindOrdered returns the first (or, with desc, the last) limit documents BY
+// order, which must be a --range-indexed field. Without an order a limit
+// returns an arbitrary subset rather than the top/latest N.
+func (c *Client) FindOrdered(where string, limit int, order string, desc bool) (*FindResult, error) {
+	var out FindResult
+	q := fmt.Sprintf("/find?%s&where=%s&limit=%d&order=%s", c.qs(), url.QueryEscape(where), limit, url.QueryEscape(order))
+	if desc {
+		q += "&desc=1"
+	}
+	err := c.do("GET", q, nil, &out)
+	return &out, err
+}
+
 // Count counts matches ("" = all docs). O(1) on indexed equality / range fields.
 func (c *Client) Count(where string) (int, error) {
 	var out struct {

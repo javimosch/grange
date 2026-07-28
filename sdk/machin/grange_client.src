@@ -79,6 +79,16 @@ func grange_find(g, where, limit) (data) {
     data = grange_data(status, resp)
 }
 
+// grange_find_ordered returns the first/last `limit` documents BY `order` (a
+// --range-indexed field) rather than an arbitrary `limit` of them. desc=1 for
+// newest/highest first.
+func grange_find_ordered(g, where, limit, order, desc) (data) {
+    q := "/find?" + grange_qs(g) + "&where=" + url_encode(where) + "&limit=" + str(limit) + "&order=" + url_encode(order)
+    if desc == 1 { q = q + "&desc=1" }
+    status, resp := grange_req(g, "GET", q, "")
+    data = grange_data(status, resp)
+}
+
 func grange_count(g, where) (n) {
     n = -1
     status, resp := grange_req(g, "GET", "/count?" + grange_qs(g) + "&where=" + url_encode(where), "")

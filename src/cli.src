@@ -135,6 +135,16 @@ func cmd_del(fs) {
 
 func cmd_find(fs) {
     do_open(fs)
+    // --order <field> (or --order -field) returns the first/last n BY that
+    // field; without it a --limit returns an arbitrary n
+    ofield, odesc := ord_parse(flag_get(fs, "order"), "0")
+    if flag_on(fs, "desc") { odesc = 1 }
+    if len(ofield) > 0 {
+        data, ook, owhy := q_find_ordered(flag_get(fs, "where"), flag_int_val(fs, "limit"), ofield, odesc)
+        if ook == 0 { emit_err(80, "input", owhy, 1, "declare a range index on the ordering field") }
+        emit_ok(data)
+        return
+    }
     emit_ok(q_find(flag_get(fs, "where"), flag_int_val(fs, "limit")))
 }
 
@@ -233,6 +243,8 @@ func main() {
     fs = flag_str(fs, "doc", "D", "", "document body (minified JSON)")
     fs = flag_str(fs, "where", "w", "", "filter: field=value[,field=value] equality, ANDed")
     fs = flag_int(fs, "limit", "l", "100", "max results for find")
+    fs = flag_str(fs, "order", "o", "", "order results by a --range-indexed field (prefix - for descending)")
+    fs = flag_bool(fs, "desc", "", "order descending (newest/highest first)")
     fs = flag_int(fs, "ttl", "T", "0", "put: doc lifetime in seconds (0 = forever)")
     fs = flag_int(fs, "n", "n", "100000", "bench/torture record count")
     fs = flag_int(fs, "batch", "b", "1000", "commit batch size")

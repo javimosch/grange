@@ -390,3 +390,50 @@ every match, so the limit does not apply), invisible to a hot collection, and
 invisible to any test that only checks the documents it got back are correct —
 they were correct, there were just too many of them. It took an oracle that
 compares two implementations of the same query.
+
+## M33: ordered queries ("the latest N")
+
+M32 made `limit` cheap. It did not make it USEFUL: `find ts>=A,ts<B --limit 5`
+returned the five EARLIEST events in the window, because a limit without an
+order is an arbitrary subset. A dashboard asking "what just happened" had to
+fetch the whole window and sort it client-side.
+
+`?order=<field>&desc=1` (`--order`/`--desc` on the CLI, `order`/`desc` in every
+SDK) fixes that, and needs no new index — both storage modes already keep the
+data sorted for range queries:
+
+  · hot  — the projection is already ascending; ordering is the same [lo,hi)
+           span walked forwards or backwards
+  · cold — a range index is sorted pages plus min/max boundaries; collect the
+           span's (value, id) pairs, sort once, resolve in order, stop at the
+           limit
+
+Measured, 20k documents, "latest 5 in a 2000-wide window": 5 documents examined
+where the unordered equivalent examined the whole window. On cold, 7 pages for 5
+documents.
+
+Requirements and costs, stated plainly:
+
+- Ordering requires a `--range` index on the ordering field. Asking without one
+  is refused with the exact command to declare it, in the style of the scan
+  budget's error.
+- On cold, ordering materialises the SPAN's index entries before sorting them.
+  Bounding the window keeps that small; ordering an entire large collection does
+  not. Set `GRANGE_MAX_SCAN_DOCS` if callers might try.
+- Ties break by id, making this a TOTAL order. That matters beyond neatness:
+  with an unspecified tie order, paginating by (value, limit) can show one
+  document twice and skip another.
+
+### What the ordered oracle caught
+
+Ordering is the first query whose ORDER can be compared between storage modes —
+every earlier observable in the cold-vs-hot differential fuzz was a count or a
+single document, because an unordered find may legitimately return the same
+documents in a different order. Adding an ordered observation immediately found
+a real bug: a document updated from v=65 to v=57 DISAPPEARED from cold results.
+Its stale index entry was consumed by the dedup set before the staleness check
+rejected it, so the correct entry at its new position was then suppressed. The
+id is now marked seen only when its entry is ACCEPTED.
+
+It also flagged tie order differing between hot and cold, which is what prompted
+making ties a total order rather than papering over it in the harness.
