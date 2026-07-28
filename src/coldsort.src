@@ -1,0 +1,266 @@
+// grange external sort — bounded-memory range index builds.
+//
+// cold_rng_from_pages collected every (value, id) pair of a field into memory,
+// sorted them, and wrote the sorted pages. That is the one operation whose cost
+// scaled with the COLLECTION rather than with a page, and it was measured: on a
+// 200k-document cold collection, declaring a range index took RSS from 82 MB to
+// 257 MB. Under the hosted 100 MB budget the build SUCCEEDS and then the RSS
+// watchdog restarts the process — so one tenant declaring an index takes the
+// shared server down under every other tenant. Same isolation failure as an
+// unbounded query, in memory rather than latency.
+//
+// This is the textbook fix: spill sorted runs, then merge them.
+//
+//   1. walk the data pages, accumulating pairs; every GRANGE_SORT_SPILL pairs,
+//      sort that batch and write it out as a sorted RUN (itself paged)
+//   2. k-way merge the runs, holding ONE PAGE of each in memory at a time, and
+//      emit the final index pages as the merge produces them
+//   3. delete the spill files
+//
+// Peak memory is then one batch during phase 1, and (number of runs x page) in
+// phase 2 — never the whole field. Honest limit: the run count still grows with
+// the collection, so phase 2 grows too, just ~12x more slowly (a 2000-entry
+// page per 25000-entry run). A collection large enough for that to matter wants
+// a multi-pass merge, which this is structured to allow but does not do.
+
+// cs_external_pages: the run size (in data pages) above which a build spills.
+// Below it the whole field comfortably fits, and the in-memory sort is faster.
+func cs_external_pages() (n) {
+    n = parse_int(env("GRANGE_SORT_EXTERNAL_PAGES"))
+    if n == 0 { n = 16 }
+}
+
+func cs_spill_size() (n) {
+    n = parse_int(env("GRANGE_SORT_SPILL"))
+    if n == 0 { n = 25000 }
+}
+
+// spill run page: crun-<gen>-<rid>-x<slug>-s<run>-p<page>.grg
+func cs_run_name(rid, field, run, page) (s) {
+    s = "crun-" + gr_pad6(g_gen) + "-" + gr_pad6(rid) + "-x" + cold_fslug(field) + "-s" + gr_pad6(run) + "-p" + gr_pad6(page) + ".grg"
+}
+
+// cs_write_run sorts one batch and writes it as a paged run. Returns the number
+// of pages written.
+func cs_write_run(rid, field, run, vals, ids) (npages) {
+    npages = 0
+    n := len(vals)
+    if n == 0 { return }
+    sv, si := rb_msort(vals, ids)
+    per := cold_rng_per_page()
+    k := 0
+    while k * per < n {
+        lo := k * per
+        hi := lo + per
+        if hi > n { hi = n }
+        lines := []string{}
+        i := lo
+        while i < hi {
+            lines = append(lines, "p|" + ix_fstr(sv[i]))
+            lines = append(lines, si[i])
+            i = i + 1
+        }
+        if gr_write_recfile(gr_dir() + "/" + cs_run_name(rid, field, run, k), lines, hi - lo) == 0 { return }
+        k = k + 1
+    }
+    npages = k
+}
+
+// cs_load_page reads one page of a spill run into (vals, ids).
+func cs_load_page(rid, field, run, page) (vals, ids) {
+    vals = []float{}
+    ids = []string{}
+    body, ok := gr_load_recbody(gr_dir() + "/" + cs_run_name(rid, field, run, page))
+    if ok == 0 { return }
+    pos := 0
+    while true {
+        vln, vnext, vmore := gr_next_line(body, pos)
+        if vmore == 0 { return }
+        pos = vnext
+        if has_prefix(vln, "p|") {
+            idln, inext, imore := gr_next_line(body, pos)
+            if imore == 0 { return }
+            pos = inext
+            vals = append(vals, parse_float(substr(vln, 2, len(vln))))
+            ids = append(ids, idln)
+        }
+    }
+}
+
+// cs_cleanup removes a build's spill files. A leftover spill file is harmless
+// (nothing reads that name pattern) but it is still storage the tenant pays
+// for, so the build tidies up after itself.
+// Takes only runpages: passing a separate count alongside it is two parameters
+// that must agree, and machin's Falsifier pointed out the pair can disagree
+// (nruns=1, runpages=[]) — a real out-of-range read for any caller that got it
+// wrong. The length IS the count.
+func cs_cleanup(rid, field, runpages) {
+    r := 0
+    while r < len(runpages) {
+        p := 0
+        while p < runpages[r] {
+            remove(gr_dir() + "/" + cs_run_name(rid, field, r, p))
+            p = p + 1
+        }
+        r = r + 1
+    }
+}
+
+// cold_rng_build_external is the bounded-memory replacement for
+// cold_rng_from_pages. Same output, same file names, same on-disk format — only
+// the peak memory differs.
+func cold_rng_build_external(rid, pcount, field) (ok) {
+    ok = 0
+    spill := cs_spill_size()
+    per := cold_rng_per_page()
+
+    // ---- phase 1: spill sorted runs ----
+    nruns := 0
+    runpages := []int{}
+    vals := []float{}
+    ids := []string{}
+    k := 0
+    while k < pcount {
+        body, rok := gr_load_recbody(gr_dir() + "/" + cold_page_name(rid, k))
+        if rok == 1 {
+            pos := 0
+            while true {
+                ln, next, more := gr_next_line(body, pos)
+                if more == 0 { break }
+                pos = next
+                if has_prefix(ln, "p|") {
+                    dline, dnext, dmore := gr_next_line(body, pos)
+                    if dmore == 0 { break }
+                    pos = dnext
+                    tok := ix_field_tok(dline, field)
+                    if len(tok) > 0 {
+                        c := charat(tok, 0)
+                        if c != "\"" && c != "{" && c != "[" && c != "t" && c != "f" && c != "n" {
+                            vals = append(vals, parse_float(tok))
+                            ids = append(ids, substr(ln, 2, len(ln)))
+                        }
+                    }
+                }
+            }
+        }
+        if len(vals) >= spill {
+            np := cs_write_run(rid, field, nruns, vals, ids)
+            if np == 0 { return }
+            runpages = append(runpages, np)
+            nruns = nruns + 1
+            vals = []float{}
+            ids = []string{}
+        }
+        k = k + 1
+    }
+    if len(vals) > 0 {
+        np := cs_write_run(rid, field, nruns, vals, ids)
+        if np == 0 { return }
+        runpages = append(runpages, np)
+        nruns = nruns + 1
+        vals = []float{}
+        ids = []string{}
+    }
+    if nruns == 0 {
+        // an empty index is still a complete one
+        empty := []string{}
+        if gr_write_recfile(gr_dir() + "/" + cold_rng_meta_name(rid, field), empty, 0) == 0 { return }
+        ok = 1
+        return
+    }
+
+    // ---- phase 2: k-way merge, one page of each run resident ----
+    hv := make(map[int][]float)
+    hi_ := make(map[int][]string)
+    hpage := make(map[int]int)
+    hpos := make(map[int]int)
+    r := 0
+    while r < nruns {
+        pv, pi := cs_load_page(rid, field, r, 0)
+        hv[r] = pv
+        hi_[r] = pi
+        hpage[r] = 0
+        hpos[r] = 0
+        r = r + 1
+    }
+
+    outv := []float{}
+    outi := []string{}
+    meta := []string{}
+    opage := 0
+    total := 0
+    while true {
+        // pick the smallest head by the FULL key, so the merge preserves the
+        // same total order the in-memory sort produces (ties by id)
+        best := 0 - 1
+        r = 0
+        while r < nruns {
+            if hpos[r] < len(hv[r]) {
+                if best < 0 {
+                    best = r
+                } else {
+                    bv := hv[best][hpos[best]]
+                    cv := hv[r][hpos[r]]
+                    if cv < bv {
+                        best = r
+                    } else if cv == bv && hi_[r][hpos[r]] < hi_[best][hpos[best]] {
+                        best = r
+                    }
+                }
+            }
+            r = r + 1
+        }
+        if best < 0 { break }
+
+        outv = append(outv, hv[best][hpos[best]])
+        outi = append(outi, hi_[best][hpos[best]])
+        total = total + 1
+        hpos[best] = hpos[best] + 1
+        if hpos[best] >= len(hv[best]) {
+            np := hpage[best] + 1
+            if np < runpages[best] {
+                pv, pi := cs_load_page(rid, field, best, np)
+                hv[best] = pv
+                hi_[best] = pi
+                hpage[best] = np
+                hpos[best] = 0
+            }
+        }
+
+        if len(outv) >= per {
+            lines := []string{}
+            i := 0
+            while i < len(outv) {
+                lines = append(lines, "p|" + ix_fstr(outv[i]))
+                lines = append(lines, outi[i])
+                i = i + 1
+            }
+            if gr_write_recfile(gr_dir() + "/" + cold_rng_name(rid, field, opage), lines, len(outv)) == 0 { return }
+            meta = append(meta, "p|" + str(opage))
+            meta = append(meta, "{\"min\":" + ix_fstr(outv[0]) + ",\"max\":" + ix_fstr(outv[len(outv)-1]) + ",\"n\":" + str(len(outv)) + "}")
+            opage = opage + 1
+            outv = []float{}
+            outi = []string{}
+        }
+    }
+    if len(outv) > 0 {
+        lines := []string{}
+        i := 0
+        while i < len(outv) {
+            lines = append(lines, "p|" + ix_fstr(outv[i]))
+            lines = append(lines, outi[i])
+            i = i + 1
+        }
+        if gr_write_recfile(gr_dir() + "/" + cold_rng_name(rid, field, opage), lines, len(outv)) == 0 { return }
+        meta = append(meta, "p|" + str(opage))
+        meta = append(meta, "{\"min\":" + ix_fstr(outv[0]) + ",\"max\":" + ix_fstr(outv[len(outv)-1]) + ",\"n\":" + str(len(outv)) + "}")
+        opage = opage + 1
+    }
+
+    // boundaries last: a build interrupted before this leaves index pages that
+    // nothing references, exactly like a run without its manifest
+    if gr_write_recfile(gr_dir() + "/" + cold_rng_meta_name(rid, field), meta, opage) == 0 { return }
+    gr_sync_dir()
+    cs_cleanup(rid, field, runpages)
+    ok = 1
+}

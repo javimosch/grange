@@ -245,7 +245,9 @@ make verify   # check + tests (69) + 100k bench + crash harness
   break by id, which makes it a TOTAL order — the same query returns the same sequence on hot and
   cold, so paginating cannot show a document twice or skip one. Honest cost: on cold, ordering
   materialises the SPAN's index entries, so bound the window (or set a scan budget) rather than
-  ordering an entire large collection.
+  ordering an entire large collection. Declaring a range index no longer holds the whole field in
+  memory: large builds spill sorted runs and merge them a page at a time inside a scoped arena
+  (measured over 200k documents, build RSS +160 MB -> -11 MB, byte-identical output).
 - PAGINATION is keyset, not offset: an ordered response carries `next`, and `?after=<cursor>`
   (`--after`, or `pages()` / `FindPage` in the SDKs) resumes strictly past it. Every page costs
   the same — an offset has to walk the rows it skips, so page 500 would cost 500x page 1 — and a

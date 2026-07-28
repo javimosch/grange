@@ -97,6 +97,29 @@ func cold_rng_from_docs(rid, field, docs) (ok) {
 // in memory — bounded by the collection, not by a page — so an index build over
 // a very large cold collection is the one operation that still scales with size.
 func cold_rng_from_pages(rid, pcount, field) (ok) {
+    // Big builds go through the external sort, which never holds the whole
+    // field. The in-memory path is kept for small ones: it is faster, and
+    // spilling runs to disk for a handful of pages is pure overhead.
+    // GRANGE_SORT_EXTERNAL forces either path, which is how the two are
+    // compared against each other in the tests.
+    force := env("GRANGE_SORT_EXTERNAL")
+    if force == "1" || (force != "0" && pcount >= cs_external_pages()) {
+        // The scoped arena is not an optimisation here, it is the point.
+        // Spilling holds less LIVE memory than sorting the field at once, but
+        // it ALLOCATES more in total (write the runs, read them back), and in
+        // the long-lived actor nothing is reclaimed until the goroutine
+        // returns — which it never does. Measured without this block, the
+        // external sort was WORSE than the in-memory one: +295 MB vs +176 MB.
+        //
+        // Safe to scope because the build stores nothing that outlives it: it
+        // writes files and returns an int. The only globals it touches are the
+        // query cost counters, which are scalars (machin#539 is about pointers
+        // into the arena, and an int is not one).
+        r := 0
+        arena { r = escape(cold_rng_build_external(rid, pcount, field)) }
+        ok = r
+        return
+    }
     vals := []float{}
     ids := []string{}
     k := 0

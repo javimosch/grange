@@ -551,3 +551,72 @@ tie-break removed from the merge sort:
          paged=282 oneshot=300 dups=[k082 k083 k104] missing=[k023 k037 k038]
 
 Documents both duplicated and lost, exactly as an unstable order predicts.
+
+## M36: index builds that fit in the budget
+
+Declaring a range index collected every (value, id) pair of the field into
+memory, sorted them, and wrote the sorted pages — the one operation whose cost
+scaled with the COLLECTION rather than with a page, and the README said so.
+Measured on 200k documents: RSS 82 MB -> 257 MB.
+
+The failure mode under the hosted 100 MB budget is worth stating precisely,
+because it is not the obvious one. The build SUCCEEDS and answers the request;
+then the RSS watchdog fires and restarts the process:
+
+    {"event":"rss_restart","rss_kb":266080,"max_mb":100,"loaded":3}
+
+So the tenant who declared the index gets their index. Everyone else on the
+shared server gets their in-flight request dropped. It is M31's isolation
+problem again — one tenant's work paid for by all the others — in memory rather
+than latency.
+
+`src/coldsort.src` replaces it with an external sort: walk the data pages
+accumulating pairs, spill a sorted run every `GRANGE_SORT_SPILL` (25k) pairs,
+then k-way merge the runs holding ONE PAGE of each in memory, emitting the final
+index pages as the merge produces them. Spill files are deleted afterwards, and
+the boundary file is still written last, so an interrupted build leaves
+unreferenced pages rather than a corrupt index.
+
+### The measurement that changed the design
+
+The external sort ALONE made things worse: +295 MB against the in-memory path's
++176 MB. It holds less live memory but allocates more in total — it writes the
+runs and reads them back — and in the long-lived actor nothing is reclaimed
+until the goroutine returns, which it never does. The fix only works inside a
+scoped `arena { }`:
+
+| 200k documents | build RSS delta |
+|---|---|
+| in-memory (old) | +160 MB |
+| external, no arena | +295 MB |
+| external, scoped arena | **-11 MB** (it drops: the arena returns the pages) |
+
+Scoping is safe here for the reason machin#539 is dangerous: the build stores
+nothing that outlives it. It writes files and returns an int. The only globals
+it touches are the query cost counters, which are scalars, not pointers into the
+arena.
+
+Under a 100 MB budget the same 200k build now completes with zero watchdog
+restarts, the server stays up, and ordered queries work against the result.
+
+### Verification
+
+`scripts/indexbuild_test.sh` (`make indexbuild`) builds the same index both ways
+against identical data in one run and asserts the output is BYTE-IDENTICAL —
+same file names, same bytes, no spill files left behind — then that the external
+path costs under half the memory, then that a build under a tight budget causes
+no restart and produces an index that answers ordered queries. It repeats the
+identity check with 3000-entry spills so the k-way merge is exercised at depth
+rather than with two or three runs.
+
+The harness lied on its first run, in the way this project has been caught
+before: `/bulk` caps a request at 50000 ops, so a single POST of a 200k fixture
+was REJECTED, both builds indexed an EMPTY collection, both reported 2 MB, and
+the byte-identity check passed by comparing two empty indexes — in 7 seconds.
+Seeding now chunks the load and ASSERTS THE OBSERVED DOCUMENT COUNT, which is
+the only thing that turns a seeding bug into a failure instead of a fast pass.
+
+machin's Falsifier also earned its place during this milestone: it flagged
+`cs_cleanup(rid, field, nruns, runpages)` as an out-of-range read for
+`nruns=1, runpages=[]`. No caller passes that, but it is a signature with two
+parameters that must agree; the length is now the count.
