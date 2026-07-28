@@ -734,3 +734,26 @@ a silent wrong answer, which is worse than the scan it saves.
 Validated by the two differential fuzzes, which compare counts after every
 operation including deletes, flushes and compactions (7200 ops), and by the
 replication fuzz for the follower path.
+
+#### Measuring on production is not free, and I polluted my own numbers
+
+The post-deploy reading of "83 kB, then 23 kB" per request was taken by firing
+200-request bursts at the live server — which trips its own fair-use cap (300
+requests/minute, M15). Once the limiter engaged, `/stats` stopped returning data
+and the deltas became meaningless (one probe reported a NEGATIVE per-request
+cost). Production is a rate-limited multi-tenant service; it is not a benchmark
+rig, and burst-probing it measures the limiter.
+
+The honest figures come from reproducing production's SHAPE locally — a cold
+collection with five runs, which is what the mirror looks like between
+compactions:
+
+| | bytes/request |
+|---|---|
+| request baseline (`/health`) | ~7-8 k |
+| unfiltered count, cache warm | 11.7 k |
+| count alternating with writes (cache always invalidated) | 42.6 k |
+
+So a repeated count now costs little more than the request itself, and the scan
+is paid once per write batch rather than once per request. Counts verified
+correct in both states (10000, then 10100 after 100 writes).
