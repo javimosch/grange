@@ -124,55 +124,9 @@ func srv_handle(req) (res) {
     if g_srv_follow == 0 { tn_sweep() }
     // tenants get a two-level namespace: db (?db=, default "default") / collection
     root := g_srv_db
-    if role == "tenant" {
-        dbname := query(req, "db")
-        if len(dbname) == 0 { dbname = srv_body_str(req, "db") }
-        if len(dbname) == 0 { dbname = "default" }
-        if valid_id(dbname) == 0 || contains(dbname, ".") {
-            res = srv_err("400 Bad Request", "input", "bad db name")
-            return
-        }
-        root = tn_root(tid) + "/" + dbname
-    }
-    if role == "tenant" && req.method == "GET" && has_prefix(req.path, "/dbs") {
-        entries := list_dir(tn_root(tid))
-        items := []string{}
-        i := 0
-        while i < len(entries) {
-            if contains(entries[i], ".") == false {
-                items = append(items, "\"" + jesc(entries[i]) + "\"")
-            }
-            i = i + 1
-        }
-        res = srv_ok("{\"dbs\":[" + join(items, ",") + "]}")
-        return
-    }
-    if req.method == "GET" && has_prefix(req.path, "/usage") {
-        utid := tid
-        if role == "admin" { utid = query(req, "tenant") }
-        if len(utid) == 0 {
-            res = srv_err("400 Bad Request", "input", "admin usage needs ?tenant=<tid>")
-            return
-        }
-        res = srv_ok(tn_usage(utid))
-        return
-    }
-    if role == "admin" && req.method == "GET" && has_prefix(req.path, "/tenants") {
-        ok2, errmsg2 := gr_use(g_srv_db, "_sys")
-        res = srv_ok(q_find("", 1000))
-        return
-    }
-    if req.method == "GET" && has_prefix(req.path, "/collections") {
-        entries := list_dir(root)
-        items := []string{}
-        i := 0
-        while i < len(entries) {
-            if contains(entries[i], ".") == false {
-                items = append(items, "\"" + jesc(entries[i]) + "\"")
-            }
-            i = i + 1
-        }
-        res = srv_ok("{\"collections\":[" + join(items, ",") + "]}")
+    mres, mhandled := srv_meta_routes(req, role, tid, root)
+    if mhandled == 1 {
+        res = mres
         return
     }
     if g_srv_follow == 1 && req.method == "POST" && req.path != "/shutdown" {
@@ -294,112 +248,9 @@ func srv_handle(req) (res) {
         res = srv_ok(body)
         return
     }
-    // bulk: newline-delimited ops, ONE commit for the whole batch.
-    //   {...}            put, auto id
-    //   <id>\t{...}      put with id
-    //   -\t<id>          delete
-    if req.method == "POST" && (req.path == "/bulk" || has_prefix(req.path, "/bulk?")) {
-        // Counting is index arithmetic over the body (no line is materialised).
-        nlines := gr_count_lines(bytes(req.body))
-        if nlines > 50000 {
-            res = srv_err("400 Bad Request", "input", "max 50000 ops per bulk request (got " + str(nlines) + ")")
-            return
-        }
-        // A large batch on a cold collection is written as its own run: the
-        // memtable is flushed first (it shadows runs, so an older unflushed doc
-        // would hide this newer batch), the whole write happens inside an arena
-        // in passes over the body, and the manifest state is re-read from disk.
-        // Ingest therefore retains neither the batch nor a parsed copy of it.
-        // Records are validated as they are written — a run whose manifest was
-        // never written is invisible to recovery, so a bad line still applies
-        // nothing.
-        if g_cold == 1 && nlines >= cold_bulk_threshold() {
-            if cold_flush() == 0 {
-                res = srv_err("500 Internal Server Error", "internal", "flush before direct bulk failed")
-                return
-            }
-            rid := cold_next_rid()
-            applied := 0
-            arena { applied = escape(cold_bulk_direct(bytes(req.body), rid)) }
-            if applied < 0 {
-                if applied < 0 - 1 {
-                    res = srv_err("400 Bad Request", "input", "bad op at line " + str(0 - applied - 1) + " (nothing applied)")
-                    return
-                }
-                res = srv_err("500 Internal Server Error", "internal", "direct bulk write failed")
-                return
-            }
-            cold_load_runs()
-            if len(g_run_rid) > cold_max_runs() { gr_compact() }
-            // watchers can't be handed 10k individual changes (the ring holds
-            // 400): advance the sequence so anyone behind gets resync=1, which
-            // is the designed fallback for "you are too far behind to patch"
-            g_seq = g_seq + applied
-            res = srv_ok("{\"ops\":" + str(applied) + ",\"mode\":\"direct-run\",\"ids\":[]}")
-            return
-        }
-        // Small batches stage through the memtable, so they are validated first:
-        // nothing may be applied unless the whole batch is clean.
-        badline := 0
-        arena {
-            vbody := bytes(req.body)
-            vpos := 0
-            li := 0
-            while true {
-                ln, next, more := gr_next_line(vbody, vpos)
-                if more == 0 { break }
-                vpos = next
-                li = li + 1
-                t := trim(ln)
-                if len(t) > 0 && has_prefix(t, "-\t") == false {
-                    tabp := index(t, "\t")
-                    bdoc := t
-                    bid := "x"
-                    if tabp > 0 {
-                        bid = substr(t, 0, tabp)
-                        bdoc = substr(t, tabp + 1, len(t))
-                    }
-                    if valid_id(bid) == 0 || valid_doc(bdoc) == 0 {
-                        if badline == 0 { badline = li }
-                    }
-                }
-            }
-        }
-        if badline > 0 {
-            res = srv_err("400 Bad Request", "input", "bad op at line " + str(badline) + " (nothing applied)")
-            return
-        }
-        lines := split(req.body, "\n")
-        ids := []string{}
-        nops := 0
-        i := 0
-        while i < len(lines) {
-            ln := trim(lines[i])
-            if len(ln) > 0 {
-                if has_prefix(ln, "-\t") {
-                    gr_del(substr(ln, 2, len(ln)))
-                    nops = nops + 1
-                } else {
-                    tabp := index(ln, "\t")
-                    bid := ""
-                    bdoc := ln
-                    if tabp > 0 {
-                        bid = substr(ln, 0, tabp)
-                        bdoc = substr(ln, tabp + 1, len(ln))
-                    }
-                    if len(bid) == 0 { bid = to_hex(rand_bytes(8)) }
-                    gr_put(bid, bdoc)
-                    if len(ids) < 100 { ids = append(ids, "\"" + jesc(bid) + "\"") }
-                    nops = nops + 1
-                }
-            }
-            i = i + 1
-        }
-        if gr_commit() == 0 {
-            res = srv_err("500 Internal Server Error", "internal", "wal chunk write failed")
-            return
-        }
-        res = srv_ok("{\"ops\":" + str(nops) + ",\"ids\":[" + join(ids, ",") + "]}")
+    bres, bhandled := srv_bulk_route(req)
+    if bhandled == 1 {
+        res = bres
         return
     }
     if req.method == "GET" && has_prefix(req.path, "/watch") {

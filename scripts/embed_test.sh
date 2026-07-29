@@ -29,8 +29,8 @@ check() { if [ "$2" = "1" ]; then echo "  ok   $1"; else echo "  FAIL $1"; fails
 # module is added here, embedders must add it too, and that is the point of
 # having the list in one place.
 CORE=(
-  "$SRC/engine.src" "$SRC/registry.src"
-  "$SRC/cold.src" "$SRC/coldindex.src" "$SRC/coldrange.src" "$SRC/coldsort.src"
+  "$SRC/recfile.src" "$SRC/engine.src" "$SRC/registry.src"
+  "$SRC/cold.src" "$SRC/coldbulk.src" "$SRC/coldindex.src" "$SRC/coldquery.src" "$SRC/coldrange.src" "$SRC/coldsort.src"
   "$SRC/index.src" "$SRC/range.src" "$SRC/qcost.src" "$SRC/project.src" "$SRC/query.src" "$SRC/order.src"
 )
 

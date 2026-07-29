@@ -1,0 +1,68 @@
+// grange server — the ACCOUNT routes: tenant/admin listings, usage and
+// collection discovery. Split out of serve.src to keep every file under the
+// project's 500-line limit.
+//
+// The cut is deliberate and sits AFTER authentication: srv_handle resolves the
+// caller and the db root, then hands over anything that is about the account
+// rather than about data. A first attempt cut higher and took the auth gate
+// with it, which every route below depends on.
+//
+// Same contract as srv_tail_routes: handled=1 means a response was produced,
+// 0 means carry on matching. scripts/routes_test.sh guards the split.
+
+func srv_meta_routes(req, role, tid, root) (res, handled) {
+    res = srv_err("404 Not Found", "not-found", "unreachable")
+    handled = 1
+    if role == "tenant" {
+        dbname := query(req, "db")
+        if len(dbname) == 0 { dbname = srv_body_str(req, "db") }
+        if len(dbname) == 0 { dbname = "default" }
+        if valid_id(dbname) == 0 || contains(dbname, ".") {
+            res = srv_err("400 Bad Request", "input", "bad db name")
+            return
+        }
+        root = tn_root(tid) + "/" + dbname
+    }
+    if role == "tenant" && req.method == "GET" && has_prefix(req.path, "/dbs") {
+        entries := list_dir(tn_root(tid))
+        items := []string{}
+        i := 0
+        while i < len(entries) {
+            if contains(entries[i], ".") == false {
+                items = append(items, "\"" + jesc(entries[i]) + "\"")
+            }
+            i = i + 1
+        }
+        res = srv_ok("{\"dbs\":[" + join(items, ",") + "]}")
+        return
+    }
+    if req.method == "GET" && has_prefix(req.path, "/usage") {
+        utid := tid
+        if role == "admin" { utid = query(req, "tenant") }
+        if len(utid) == 0 {
+            res = srv_err("400 Bad Request", "input", "admin usage needs ?tenant=<tid>")
+            return
+        }
+        res = srv_ok(tn_usage(utid))
+        return
+    }
+    if role == "admin" && req.method == "GET" && has_prefix(req.path, "/tenants") {
+        ok2, errmsg2 := gr_use(g_srv_db, "_sys")
+        res = srv_ok(q_find("", 1000))
+        return
+    }
+    if req.method == "GET" && has_prefix(req.path, "/collections") {
+        entries := list_dir(root)
+        items := []string{}
+        i := 0
+        while i < len(entries) {
+            if contains(entries[i], ".") == false {
+                items = append(items, "\"" + jesc(entries[i]) + "\"")
+            }
+            i = i + 1
+        }
+        res = srv_ok("{\"collections\":[" + join(items, ",") + "]}")
+        return
+    }
+    handled = 0
+}

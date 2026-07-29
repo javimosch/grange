@@ -1009,3 +1009,65 @@ carry the things that cost time to learn: read the `mode`/`scanned`/`pages`
 fields, ordering needs a `--range` index, pagination is keyset, `gr_reset()`
 frees what the CALLER holds, check WHICH binary answered, and do not burst-probe
 a live instance because the rate limiter makes the numbers meaningless.
+
+## M44: the published SDKs, and the 500-line rule
+
+### An SDK version meant two different things
+
+grange shipped ordering (M33), keyset pagination (M35) and projection (M43),
+adding each to all four SDKs. None of it reached anybody. Unpacking what the
+registries actually serve:
+
+| | npm / PyPI `grange-db` 0.11.0 | repo |
+|---|---|---|
+| `order` | 0 occurrences | yes |
+| `after` | 0 occurrences | yes |
+| `fields` | 0 occurrences | yes |
+
+The newest Go tag was `sdk/go/v0.10.0`, so `go get …@latest` predated all three
+too. And the repo was ALSO labelled 0.11.0 — one version number naming two
+different bodies of code, which registries will not let you fix by republishing.
+
+The v0.11.0 release note said "All four SDKs take `fields`". True of the
+repository, false of anything installable. That note has been CORRECTED in place
+rather than quietly patched: it now says which versions carry it, and that the
+HTTP API works regardless of SDK version.
+
+Repo SDKs are 0.12.0, verified end-to-end against a live server — ordered plus
+projected queries and cursor paging, in node, python, Go (`FindFields`) and
+machin (`grange_find_fields`). `sdk/go/v0.12.0` is tagged, which is all a Go
+consumer needs. npm and PyPI require credentials this machine does not have.
+
+`scripts/sdk_version_test.sh` (`make sdkversion`) fails when the repo's SDK
+version equals the published one but the sources mention features the published
+artifact lacks, and checks the Go tag the same way. Offline it SKIPS rather than
+passes — a check that silently succeeds when it cannot reach what it checks is
+worse than no check. Negative control: pinned back to 0.11.0 it reports exactly
+the state that shipped.
+
+### Every file is under 500 lines again
+
+The project's rule is 500 lines per file. Four files had drifted past it, and I
+had deferred fixing that five times, each time noting it would keep
+not-happening unless it was the milestone. It was the milestone.
+
+| | before | after |
+|---|---|---|
+| `cold.src` | 585 | 446 (+ `coldbulk.src` 146) |
+| `serve.src` | 580 | 431 (+ `servemeta.src` 68, `servebulk.src` 123) |
+| `engine.src` | 562 | 409 (+ `recfile.src` 160) |
+| `coldindex.src` | 518 | 431 (+ `coldquery.src` 232) |
+
+Every cut follows a concern, not a line count: record-file format and durability
+out of the engine; bulk ingest out of both the cold path and the router; account
+routes out of the data routes; index READING out of index BUILDING.
+
+One cut was wrong and the compiler caught it: extracting the "meta" routes from
+`serve.src` took the authentication gate with them, and everything downstream
+depends on `role`/`tid`. The second attempt cuts deliberately BELOW auth, and
+says so in the file, because the next person will be tempted by the same
+boundary.
+
+The harnesses earned their place again: `make routes` after every split, and
+`make embed` caught that poche's build list needed the four new files — which
+is exactly the drift that broke poche silently before it existed.

@@ -1,0 +1,123 @@
+// grange server — the bulk ingest route. Split out of serve.src to keep every
+// file under the project's 500-line limit.
+//
+// It is the largest single route by some margin because it carries the whole
+// ingest decision: count the ops without materialising a line, route a large
+// batch on a cold collection straight to its own run (flushing the memtable
+// first, since an older unflushed doc would shadow the newer batch), and
+// validate small batches up front so nothing is applied unless the whole batch
+// is clean.
+
+func srv_bulk_route(req) (res, handled) {
+    res = srv_err("404 Not Found", "not-found", "unreachable")
+    handled = 1
+    // bulk: newline-delimited ops, ONE commit for the whole batch.
+    //   {...}            put, auto id
+    //   <id>\t{...}      put with id
+    //   -\t<id>          delete
+    if req.method == "POST" && (req.path == "/bulk" || has_prefix(req.path, "/bulk?")) {
+        // Counting is index arithmetic over the body (no line is materialised).
+        nlines := gr_count_lines(bytes(req.body))
+        if nlines > 50000 {
+            res = srv_err("400 Bad Request", "input", "max 50000 ops per bulk request (got " + str(nlines) + ")")
+            return
+        }
+        // A large batch on a cold collection is written as its own run: the
+        // memtable is flushed first (it shadows runs, so an older unflushed doc
+        // would hide this newer batch), the whole write happens inside an arena
+        // in passes over the body, and the manifest state is re-read from disk.
+        // Ingest therefore retains neither the batch nor a parsed copy of it.
+        // Records are validated as they are written — a run whose manifest was
+        // never written is invisible to recovery, so a bad line still applies
+        // nothing.
+        if g_cold == 1 && nlines >= cold_bulk_threshold() {
+            if cold_flush() == 0 {
+                res = srv_err("500 Internal Server Error", "internal", "flush before direct bulk failed")
+                return
+            }
+            rid := cold_next_rid()
+            applied := 0
+            arena { applied = escape(cold_bulk_direct(bytes(req.body), rid)) }
+            if applied < 0 {
+                if applied < 0 - 1 {
+                    res = srv_err("400 Bad Request", "input", "bad op at line " + str(0 - applied - 1) + " (nothing applied)")
+                    return
+                }
+                res = srv_err("500 Internal Server Error", "internal", "direct bulk write failed")
+                return
+            }
+            cold_load_runs()
+            if len(g_run_rid) > cold_max_runs() { gr_compact() }
+            // watchers can't be handed 10k individual changes (the ring holds
+            // 400): advance the sequence so anyone behind gets resync=1, which
+            // is the designed fallback for "you are too far behind to patch"
+            g_seq = g_seq + applied
+            res = srv_ok("{\"ops\":" + str(applied) + ",\"mode\":\"direct-run\",\"ids\":[]}")
+            return
+        }
+        // Small batches stage through the memtable, so they are validated first:
+        // nothing may be applied unless the whole batch is clean.
+        badline := 0
+        arena {
+            vbody := bytes(req.body)
+            vpos := 0
+            li := 0
+            while true {
+                ln, next, more := gr_next_line(vbody, vpos)
+                if more == 0 { break }
+                vpos = next
+                li = li + 1
+                t := trim(ln)
+                if len(t) > 0 && has_prefix(t, "-\t") == false {
+                    tabp := index(t, "\t")
+                    bdoc := t
+                    bid := "x"
+                    if tabp > 0 {
+                        bid = substr(t, 0, tabp)
+                        bdoc = substr(t, tabp + 1, len(t))
+                    }
+                    if valid_id(bid) == 0 || valid_doc(bdoc) == 0 {
+                        if badline == 0 { badline = li }
+                    }
+                }
+            }
+        }
+        if badline > 0 {
+            res = srv_err("400 Bad Request", "input", "bad op at line " + str(badline) + " (nothing applied)")
+            return
+        }
+        lines := split(req.body, "\n")
+        ids := []string{}
+        nops := 0
+        i := 0
+        while i < len(lines) {
+            ln := trim(lines[i])
+            if len(ln) > 0 {
+                if has_prefix(ln, "-\t") {
+                    gr_del(substr(ln, 2, len(ln)))
+                    nops = nops + 1
+                } else {
+                    tabp := index(ln, "\t")
+                    bid := ""
+                    bdoc := ln
+                    if tabp > 0 {
+                        bid = substr(ln, 0, tabp)
+                        bdoc = substr(ln, tabp + 1, len(ln))
+                    }
+                    if len(bid) == 0 { bid = to_hex(rand_bytes(8)) }
+                    gr_put(bid, bdoc)
+                    if len(ids) < 100 { ids = append(ids, "\"" + jesc(bid) + "\"") }
+                    nops = nops + 1
+                }
+            }
+            i = i + 1
+        }
+        if gr_commit() == 0 {
+            res = srv_err("500 Internal Server Error", "internal", "wal chunk write failed")
+            return
+        }
+        res = srv_ok("{\"ops\":" + str(nops) + ",\"ids\":[" + join(ids, ",") + "]}")
+        return
+    }
+    handled = 0
+}
