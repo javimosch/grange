@@ -32,7 +32,12 @@ check() { if [ "$2" = "1" ]; then echo "  ok   $1"; else echo "  FAIL $1"; fails
 
 DB=$(mktemp -d /tmp/grange-ret-XXXX); rm -rf "$DB"
 fuser -k "$PORT/tcp" 2>/dev/null; sleep 0.3
-GRANGE_MAX_RSS_MB=4000 "$BIN" serve --db "$DB" --port "$PORT" --token "$TOK" >/dev/null 2>&1 &
+# resets OFF here: this harness measures what ONE request retains, and a
+# periodic gr_reset() drops and reloads the whole collection, so the per-request
+# delta becomes the reset's swing rather than the request's cost (measured: it
+# reads as -114 kB on one probe and +342 kB on the next). The reset behaviour is
+# asserted separately at the end.
+GRANGE_RESET_EVERY=0 GRANGE_MAX_RSS_MB=4000 "$BIN" serve --db "$DB" --port "$PORT" --token "$TOK" >/dev/null 2>&1 &
 SRV=$!
 for _ in $(seq 1 80); do sleep 0.1; curl -sf "http://localhost:$PORT/health" >/dev/null 2>&1 && break; done
 
@@ -91,6 +96,53 @@ done
 # budget (GRANGE_MAX_SCAN_DOCS) is what bounds this in production.
 SCAN=$(kb "/count?coll=big&where=nosuchfield%3Dx")
 echo "  for reference, an unindexed scan of 20k docs: ${SCAN} kB/request"
+
+curl -s -X POST "http://localhost:$PORT/shutdown" -H "$A" >/dev/null 2>&1
+sleep 0.4; kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
+
+# ---- periodic arena reset (M38, opt-in via GRANGE_RESET_EVERY) ----
+#
+# gr_reset() reclaims the actor's arena between requests instead of letting the
+# RSS watchdog restart the process. What is asserted here is CORRECTNESS across
+# resets, not a memory win: the win is real but workload-dependent (it lowers
+# the sustained level markedly and adds a reload spike proportional to the
+# collection), so asserting it would encode a claim that is only sometimes true.
+# The numbers are printed for the record.
+fuser -k "$PORT/tcp" 2>/dev/null; sleep 0.3
+GRANGE_RESET_EVERY=200 GRANGE_MAX_RSS_MB=4000 "$BIN" serve --db "$DB" --port "$PORT" --token "$TOK" >/tmp/gret-reset.log 2>&1 &
+SRV=$!
+for _ in $(seq 1 80); do sleep 0.1; curl -sf "http://localhost:$PORT/health" >/dev/null 2>&1 && break; done
+BEFORE=$(rss)
+for _ in $(seq 1 1200); do curl -s "http://localhost:$PORT/find?coll=big&where=site%3Da.io&limit=20" -H "$A" >/dev/null; done
+AFTER=$(rss)
+RESETS=$(grep -c arena_reset /tmp/gret-reset.log || true)
+echo "  with GRANGE_RESET_EVERY=200: $((BEFORE/1024))MB -> $((AFTER/1024))MB over 1200 requests, $RESETS resets"
+[ "${RESETS:-0}" -gt 0 ] && check "periodic resets fire when enabled" 1 || check "periodic resets fire when enabled (none)" 0
+
+# data must be intact, and auth must still work: the token and db path are
+# re-derived from argv/env after each reset because the arena that held them
+# was freed
+C=$(curl -s "http://localhost:$PORT/count?coll=big" -H "$A" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["count"])' 2>/dev/null || echo 0)
+[ "$C" = "20000" ] && check "data intact across resets" 1 || check "data intact across resets (count=$C)" 0
+BAD=$(curl -s "http://localhost:$PORT/count?coll=big" -H "authorization: Bearer wrong" | grep -c '"auth"' || true)
+[ "$BAD" = "1" ] && check "auth still enforced across resets" 1 || check "auth still enforced across resets" 0
+
+# and pages must still be WALKABLE. g_nl (bytes("\n"), the separator every page
+# walk searches for) is the engine's only computed global; arena_reset() freed
+# it, so before the fix every page read as empty and `verify` reported
+# "malformed page records" on files that were perfectly fine — while counts
+# stayed correct, because they answer from the manifest and never walk a page.
+curl -s -X POST "http://localhost:$PORT/cold?coll=coldy" -H "$A" >/dev/null
+python3 -c "
+import json
+print('\n'.join('c%d\t%s' % (i, json.dumps({'ts': 1785000000+i})) for i in range(400)))
+" | curl -s -m 60 -X POST "http://localhost:$PORT/bulk?coll=coldy" -H "$A" --data-binary @- >/dev/null
+for _ in $(seq 1 250); do curl -s "http://localhost:$PORT/health" -H "$A" >/dev/null; done
+V=$(curl -s "http://localhost:$PORT/verify?coll=coldy" -H "$A")
+echo "$V" | grep -q '"intact":true' && check "cold pages still walkable after a reset (g_nl)" 1 \
+                                    || check "cold pages still walkable after a reset (g_nl): $(echo "$V" | head -c 110)" 0
+E=$(curl -s "http://localhost:$PORT/export?coll=coldy" -H "$A" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["count"])' 2>/dev/null || echo 0)
+[ "$E" = "400" ] && check "export still reads every page after a reset" 1 || check "export still reads every page after a reset (got $E)" 0
 
 curl -s -X POST "http://localhost:$PORT/shutdown" -H "$A" >/dev/null 2>&1
 sleep 0.4; kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null

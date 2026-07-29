@@ -312,6 +312,17 @@ func gr_reset() (ok) {
     R_runcount = make(map[string][]int)
     g_touch = make(map[string]int)
     arena_reset()
+    // g_nl is the only COMPUTED global in the engine — bytes("\n"), built at
+    // startup and used by gr_next_line to walk every page, chunk and index
+    // file. arena_reset() just freed it, so without this every line-walk
+    // searches for garbage: pages read as empty, and `verify` reports
+    // "malformed page records" on files that are perfectly fine. Counts still
+    // looked correct, because those answer from the manifest and never walk a
+    // page — which is exactly how this hid.
+    //
+    // It lives here rather than at the call site so EMBEDDERS get it: poche
+    // calls gr_reset() every N requests and walks pages through this same code.
+    g_nl = bytes("\n")
     ok = 1
 }
 

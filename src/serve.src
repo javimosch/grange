@@ -443,6 +443,72 @@ func srv_handle(req) (res) {
     res = srv_err("404 Not Found", "not-found", "no such route; see grange guide")
 }
 
+// ---- periodic arena reset ----
+//
+// A long-lived actor retains memory per request (M37: ~8-16 kB), and grange's
+// only answer was the RSS watchdog RESTARTING the process — which drops every
+// in-flight request and every parked watcher. poche, which embeds this same
+// engine, does something gentler: it calls gr_reset() every N requests, after
+// the response is written. grange has gr_reset() and never called it.
+//
+// gr_reset() frees the arena, and what survives that is narrow. Measured:
+// string LITERALS, env() values and args() values survive (they are backed by
+// memory outside the arena); COMPUTED strings are silently corrupted — a
+// concatenated "tok-secret123-end" came back as "1", with no crash. So anything
+// re-derived here must come from args()/env() DIRECTLY, never from the parsed
+// flag struct, whose internal maps are themselves computed.
+func srv_argv_flag(name) (v) {
+    v = ""
+    a := args()
+    i := 0
+    while i < len(a) {
+        if a[i] == name && i + 1 < len(a) {
+            v = a[i + 1]
+            return
+        }
+        i = i + 1
+    }
+}
+
+// OFF by default, and that is a measurement result rather than caution. The
+// reset lowers the SUSTAINED level a lot (measured over 6000 requests on a 20k
+// collection: 46->126 MB without, 23->61 MB with) but each reset is followed by
+// a reload of whatever the next request touches, and that spike is proportional
+// to the collection. Sampled finely on a three-collection database the peak was
+// WORSE with resets (86 MB -> 105 MB). Which effect dominates depends on
+// collection size and run length, so the operator opts in.
+func srv_reset_every() (n) {
+    n = parse_int(env("GRANGE_RESET_EVERY"))
+}
+
+var g_req_count = 0
+var g_reset_ok = 0
+var g_resets = 0
+
+// srv_maybe_reset drops the accumulated arena when it is safe to do so:
+// nothing staged, no watcher parked (they hold collection names), and only
+// between requests — never with a response half-built.
+func srv_maybe_reset() {
+    every := srv_reset_every()
+    if every == 0 { return }
+    if g_reset_ok == 0 { return }
+    if g_req_count < every { return }
+    if g_pend_recs > 0 { return }
+    if len(g_w_fd) > 0 { return }
+    if g_park > 0 { return }
+    if gr_reset() == 0 { return }
+    // re-derive from argv/env only: everything else was just freed
+    g_srv_db = srv_argv_flag("--db")
+    if len(g_srv_db) == 0 { g_srv_db = env("GRANGE_DB") }
+    tok := srv_argv_flag("--token")
+    if len(tok) == 0 { tok = env("GRANGE_TOKEN") }
+    g_srv_token = tok
+    tn_load_cache()
+    g_req_count = 0
+    g_resets = g_resets + 1
+    write(2, "{\"event\":\"arena_reset\",\"resets\":" + str(g_resets) + "}\n")
+}
+
 func cmd_serve(fs) {
     do_open(fs)
     g_srv_db = need_db(fs)
@@ -454,7 +520,18 @@ func cmd_serve(fs) {
     if port == 0 { port = 4444 }
     g_srv_token = flag_get(fs, "token")
     if len(g_srv_token) == 0 { g_srv_token = env("GRANGE_TOKEN") }
-    if len(g_srv_token) == 0 { g_srv_token = to_hex(rand_bytes(16)) }
+    generated := 0
+    if len(g_srv_token) == 0 {
+        g_srv_token = to_hex(rand_bytes(16))
+        generated = 1
+    }
+    // A GENERATED token is a computed string: it cannot be re-derived from
+    // argv or env after the arena is freed, and trusting the stale pointer
+    // would corrupt authentication. Periodic reset is therefore only enabled
+    // when the token came from --token or GRANGE_TOKEN.
+    g_reset_ok = 1
+    if generated == 1 { g_reset_ok = 0 }
+    if len(srv_argv_flag("--db")) == 0 && len(env("GRANGE_DB")) == 0 { g_reset_ok = 0 }
     harden(16777216, 30000)
     println("{\"event\":\"listening\",\"port\":" + str(port) + ",\"db\":\"" + jesc(flag_get(fs, "db")) + "\",\"coll\":\"" + jesc(flag_get(fs, "coll")) + "\",\"docs\":" + str(gr_count()) + ",\"token\":\"" + g_srv_token + "\"}")
     flush()
@@ -484,6 +561,7 @@ func cmd_serve(fs) {
                     watch_park(conn, since, g_park)
                 } else {
                     srv_write_res(conn, res)
+                    g_req_count = g_req_count + 1
                     access_log(req, res.status, len(res.body), now_ms() - started)
                     if g_shutdown == 1 {
                         write(2, "{\"event\":\"shutdown\"}\n")
@@ -493,6 +571,7 @@ func cmd_serve(fs) {
             }
         }
         watch_tick()
+        srv_maybe_reset()
         srv_rss_watchdog()
     }
 }

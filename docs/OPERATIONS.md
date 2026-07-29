@@ -815,3 +815,81 @@ the next count compared against freed memory. That is undefined behaviour and is
 now fixed, but I could NOT construct a case where it returned a wrong answer:
 the cache's sequence guard rejected every scenario I tried, including opening a
 different collection after a reset. Hygiene, not a demonstrated bug.
+
+## M38: reclaiming the arena instead of restarting the process
+
+M37 ended with grange's only answer to per-request retention being the RSS
+watchdog restarting the process — which drops every in-flight request and every
+parked watcher. poche, which embeds this same engine, already does something
+gentler: it calls `gr_reset()` every N requests. grange HAS `gr_reset()` and
+never called it.
+
+`GRANGE_RESET_EVERY=<n>` enables it, **off by default**. The reset runs only
+between requests, with nothing staged, no watcher parked, and after the response
+is written.
+
+### What survives an arena reset (measured, and narrower than it looks)
+
+`gr_reset()` calls `arena_reset()`, and what stays valid across that is:
+
+| | survives |
+|---|---|
+| string literals | yes |
+| `env()` values | yes |
+| `args()` values | yes |
+| **computed strings** | **no — silently corrupted** |
+
+A concatenated `"tok-secret123-end"` came back as `"1"`. No crash, no
+diagnostic. So anything re-derived after a reset must come from `args()`/`env()`
+DIRECTLY — including the db path and token, which cannot be read back from the
+parsed flag struct, because that struct's own maps are computed.
+
+Two consequences, both implemented:
+
+- the db path and token are re-derived from argv/env after each reset
+- a GENERATED token (`to_hex(rand_bytes(16))`, when neither `--token` nor
+  `GRANGE_TOKEN` was given) is a computed string and cannot be re-derived, so
+  periodic reset stays disabled in that case rather than corrupting auth
+
+### The bug this exposed
+
+`g_nl` — `bytes("\n")`, the separator every page, chunk and index walk searches
+for — is the engine's ONLY computed global. `arena_reset()` freed it, so after a
+reset every line-walk searched for garbage: pages read as empty and `verify`
+reported "malformed page records" on files that were perfectly fine. Counts
+stayed correct throughout, because they answer from the manifest and never walk
+a page, which is exactly how it hid.
+
+It is re-initialised inside `gr_reset()` rather than at the call site, so
+EMBEDDERS get the fix: poche calls `gr_reset()` every N requests and walks pages
+through this same code.
+
+### Why it is off by default
+
+The memory result is real but workload-dependent, and the two measurements
+disagree in a way worth recording rather than averaging away:
+
+| 6000 requests, one 20k collection, sampled every 500 | RSS |
+|---|---|
+| no reset | 46 → 126 MB (would trip a 100 MB budget) |
+| reset every 400 | 23 → 61 MB |
+
+| 4000 requests, three collections, sampled every 100 | peak RSS |
+|---|---|
+| no reset | 86 MB |
+| reset every 400 | 105 MB |
+
+Both are true. A reset drops the collection, and the next request RELOADS it, so
+the sustained level falls while transient spikes proportional to the collection
+size appear. Fine sampling catches those spikes; coarse sampling does not. An
+earlier "39 → 36 MB, flat!" reading of mine was the same artifact in the other
+direction — the endpoint happened to land just after a reset.
+
+Latency cost is small: 3.98 ms/request with no resets, 4.50 ms at the extreme of
+one reset per 25 requests on a 20k collection.
+
+So the operator opts in, with the numbers above to decide from.
+`scripts/retention_test.sh` asserts CORRECTNESS across resets — data intact,
+auth still enforced, cold pages still walkable, export still complete — and
+prints the memory numbers without asserting a winner, because encoding a
+workload-dependent claim as a test would be a lie in test form.
