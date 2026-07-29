@@ -68,6 +68,18 @@ echo "$G" | grep -qi "no fsync builtin yet" && { echo "  FAIL the guide still cl
 echo "$G" | grep -q '"version":"0.1.0"' && { echo "  FAIL the guide still reports version 0.1.0"; fails=$((fails + 1)); } \
   || echo "  ok   the version is not the M0 placeholder"
 
+# 6. the version must exist as a RELEASE, not just as a string. M41 set the
+#    guide to 0.10.0 while the newest tag was v0.9.0, so `guide` advertised a
+#    version nobody could obtain — the same class of drift, one level up.
+#    Skipped outside a git checkout (an installed binary has no repo).
+if git -C "$SRC/.." rev-parse --git-dir >/dev/null 2>&1; then
+  TAG=$(git -C "$SRC/.." tag --sort=-v:refname | head -1 | sed 's/^v//')
+  if [ -n "$TAG" ]; then
+    if [ "$GV" = "$TAG" ]; then echo "  ok   the guide's version matches the newest tag (v$TAG)"
+    else echo "  FAIL guide reports $GV but the newest tag is v$TAG — tag the release or fix the version"; fails=$((fails + 1)); fi
+  fi
+fi
+
 if [ "$fails" -eq 0 ]; then echo '{"ok":true,"guide":"pass"}'; exit 0; fi
 echo '{"ok":false,"failures":'"$fails"'}'
 exit 1

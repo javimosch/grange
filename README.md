@@ -21,6 +21,32 @@ grange is a document store written in pure [MFL](https://github.com/javimosch/ma
 
 The one row SQLite wins is the unindexed scan (typed columns beat per-doc JSON extraction); the answer is `grange index` — one command, and that query class becomes O(1)/O(bucket) forever. Aggregate registers (declare `--sums` on an index) keep per-group count/sum/avg maintained incrementally at write time — a group-by answer costs a map lookup, which is why the agg row is not a typo.
 
+## Install
+
+```sh
+curl -sSL -o grange https://github.com/javimosch/grange/releases/latest/download/grange-linux-x86_64
+chmod +x grange
+./grange guide          # the version-exact feature catalog; start here
+```
+
+Statically linked, no runtime dependencies — it runs on any linux x86-64, with
+no glibc floor. Linux x86-64 is the only published build: machin cross-compiles
+to wasm and Windows, but a database server needs POSIX, so those targets are not
+useful here. On another platform, build it yourself — `make build` needs only
+[machin](https://github.com/javimosch/machin).
+
+First run, end to end:
+
+```sh
+./grange put   --db ./data --coll notes --doc '{"title":"first","votes":3}'
+./grange index --db ./data --coll notes --field votes --range
+./grange find  --db ./data --coll notes --order votes --desc --limit 5
+./grange serve --db ./data --port 8801 --token secret      # HTTP, same surface
+```
+
+Or use the hosted instance and skip the install entirely — a peage wallet is the
+only credential: <https://grange.intrane.fr/llms.txt>.
+
 ## Model
 
 A database is a directory; a collection is a subdirectory. Docs are minified JSON keyed by id, held in memory, persisted as:
@@ -90,6 +116,13 @@ storage, €0.15/GB/month above 50 MB free**, accrued continuously and charged
 to your wallet via peage (min charge 5 cents; `GET /usage` shows bytes,
 accrual, and charges at any time). No subscription, no card on file — fund the
 wallet once, the meter does the rest.
+
+**Versions are independent.** The binary, each SDK, and the hosted instance ship
+on their own cadence, so three different numbers are visible at once (binary
+0.10.0, `grange-db` on npm/PyPI 0.11.0, `sdk/go/v0.10.0`). They are not meant to
+match: an SDK only speaks the HTTP surface, which is additive, so any recent SDK
+works against any recent server. `grange guide` and `GET /guide` report what the
+binary you are actually talking to can do — trust that over any version number.
 
 Embedded, from any machin app:
 
