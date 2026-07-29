@@ -31,7 +31,7 @@ check() { if [ "$2" = "1" ]; then echo "  ok   $1"; else echo "  FAIL $1"; fails
 CORE=(
   "$SRC/engine.src" "$SRC/registry.src"
   "$SRC/cold.src" "$SRC/coldindex.src" "$SRC/coldrange.src" "$SRC/coldsort.src"
-  "$SRC/index.src" "$SRC/range.src" "$SRC/qcost.src" "$SRC/query.src" "$SRC/order.src"
+  "$SRC/index.src" "$SRC/range.src" "$SRC/qcost.src" "$SRC/project.src" "$SRC/query.src" "$SRC/order.src"
 )
 
 # a stub main, because machin (correctly) refuses a program with no entry point:

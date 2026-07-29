@@ -171,7 +171,7 @@ func ord_find_hot(fields, ops, vals, limit, ofield, desc, cur) (items, n, next) 
         q_cost_docs(1)
         if len(doc) > 0 {
             if wh_match(doc, fields, ops, vals) == 1 {
-                items = append(items, "{\"id\":\"" + jesc(id) + "\",\"doc\":" + doc + "}")
+                items = append(items, "{\"id\":\"" + jesc(id) + "\",\"doc\":" + proj_doc(doc) + "}")
                 n = n + 1
                 next = ord_cursor_make(rvals[i], id)
             }
@@ -336,7 +336,7 @@ func ord_find_cold(fields, ops, vals, limit, ofield, desc, cur) (items, n, next)
                 if len(cur) > 0 && ix_tok_num(cur) == pv[i] {
                     seen[id] = 1
                     if wh_match(doc, fields, ops, vals) == 1 {
-                        items = append(items, "{\"id\":\"" + jesc(id) + "\",\"doc\":" + doc + "}")
+                        items = append(items, "{\"id\":\"" + jesc(id) + "\",\"doc\":" + proj_doc(doc) + "}")
                         n = n + 1
                         next = ord_cursor_make(pv[i], id)
                     }

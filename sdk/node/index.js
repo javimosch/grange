@@ -72,20 +72,25 @@ class Grange {
   // order a limit returns an arbitrary subset, not the top/latest N.
   // after: the `next` cursor from the previous page. Keyset, not offset — every
   // page costs the same, and inserts/deletes elsewhere cannot shift it.
-  async find(where = '', { limit = 100, order = '', desc = false, after = '' } = {}) {
+  // fields: return only these (comma-separated or an array). id is always
+  // included. On an 11-field document, asking for 3 is ~65% less payload —
+  // which for an agent paying per token is the point.
+  async find(where = '', { limit = 100, order = '', desc = false, after = '', fields = '' } = {}) {
     let q = `/find?${this._qs}&where=${encodeURIComponent(where)}&limit=${limit}`;
     if (order) q += `&order=${encodeURIComponent(order)}${desc ? '&desc=1' : ''}`;
     if (after) q += `&after=${encodeURIComponent(after)}`;
+    const f = Array.isArray(fields) ? fields.join(',') : fields;
+    if (f) q += `&fields=${encodeURIComponent(f)}`;
     return this._req('GET', q);
   }
 
   // pages walks every page of an ordered query, yielding documents. The loop
   // callers would otherwise write by hand, including stopping when the server
   // stops offering a cursor.
-  async *pages(where = '', { limit = 100, order = '', desc = false } = {}) {
+  async *pages(where = '', { limit = 100, order = '', desc = false, fields = '' } = {}) {
     let after = '';
     for (;;) {
-      const page = await this.find(where, { limit, order, desc, after });
+      const page = await this.find(where, { limit, order, desc, after, fields });
       for (const item of page.items) yield item;
       if (!page.next) return;
       after = page.next;

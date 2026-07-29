@@ -186,7 +186,7 @@ func q_cold_scan(fields, ops, vals, limit, countonly) (items, n) {
             while i < len(gids) {
                 if limit > 0 && n >= limit { return }
                 if wh_match(grp[gids[i]], fields, ops, vals) == 1 {
-                    items = append(items, "{\"id\":\"" + jesc(gids[i]) + "\",\"doc\":" + grp[gids[i]] + "}")
+                    items = append(items, "{\"id\":\"" + jesc(gids[i]) + "\",\"doc\":" + proj_doc(grp[gids[i]]) + "}")
                     n = n + 1
                 }
                 i = i + 1
@@ -222,7 +222,7 @@ func q_find(wh, limit) (data) {
         i := lo
         while i < hi {
             if limit > 0 && n >= limit { break }
-            items = append(items, "{\"id\":\"" + jesc(rids[i]) + "\",\"doc\":" + g_mem[rids[i]] + "}")
+            items = append(items, "{\"id\":\"" + jesc(rids[i]) + "\",\"doc\":" + proj_doc(g_mem[rids[i]]) + "}")
             n = n + 1
             i = i + 1
         }
@@ -239,7 +239,7 @@ func q_find(wh, limit) (data) {
         if q_over_budget() == 1 { break }
         doc := g_mem[ids[i]]
         if wh_match(doc, fields, ops, vals) == 1 {
-            items = append(items, "{\"id\":\"" + jesc(ids[i]) + "\",\"doc\":" + doc + "}")
+            items = append(items, "{\"id\":\"" + jesc(ids[i]) + "\",\"doc\":" + proj_doc(doc) + "}")
             n = n + 1
         }
         i = i + 1

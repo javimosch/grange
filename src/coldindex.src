@@ -302,7 +302,7 @@ func cold_idx_resolve(cands, fields, ops, vals, limit, countonly) (items, n) {
         if has(g_tomb, id) == false {
             if has(g_mem, id) {
                 if wh_match(g_mem[id], fields, ops, vals) == 1 {
-                    if countonly == 0 { items = append(items, "{\"id\":\"" + jesc(id) + "\",\"doc\":" + g_mem[id] + "}") }
+                    if countonly == 0 { items = append(items, "{\"id\":\"" + jesc(id) + "\",\"doc\":" + proj_doc(g_mem[id]) + "}") }
                     n = n + 1
                     // the memtable branch ignored the limit entirely, so a cold
                     // `find --limit 3` whose candidates were still unflushed
@@ -373,7 +373,7 @@ func cold_idx_resolve(cands, fields, ops, vals, limit, countonly) (items, n) {
                             if limit > 0 && n >= limit {
                                 i = len(pend)
                             } else {
-                                items = append(items, "{\"id\":\"" + jesc(id) + "\",\"doc\":" + pput[id] + "}")
+                                items = append(items, "{\"id\":\"" + jesc(id) + "\",\"doc\":" + proj_doc(pput[id]) + "}")
                                 n = n + 1
                             }
                         } else {

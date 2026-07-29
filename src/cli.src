@@ -135,6 +135,7 @@ func cmd_del(fs) {
 
 func cmd_find(fs) {
     do_open(fs)
+    proj_set(flag_get(fs, "fields"))
     // --order <field> (or --order -field) returns the first/last n BY that
     // field; without it a --limit returns an arbitrary n
     ofield, odesc := ord_parse(flag_get(fs, "order"), "0")
@@ -232,11 +233,11 @@ func cmd_torture(fs) {
 // MISLEADS rather than merely omits: this claimed "no fsync builtin yet" for
 // ten milestones after fsync shipped. scripts/guide_test.sh fails when a verb,
 // route or GRANGE_* variable exists in src/ but not in the guide.
-func grange_version() (v) { v = "0.10.0" }
+func grange_version() (v) { v = "0.11.0" }
 
 func cmd_guide() {
     s := ""
-    s = s + "{\"tool\":\"grange\",\"version\":\"0.10.0\",\"model\":\"document store: collections of minified-JSON docs keyed by id. A collection is HOT (whole data"
+    s = s + "{\"tool\":\"grange\",\"version\":\"0.11.0\",\"model\":\"document store: collections of minified-JSON docs keyed by id. A collection is HOT (whole data"
     s = s + "set in memory, the memtable IS the database) or COLD (disk-resident, hash-partitioned pages + run manifests; convert with POST /cold). Writes stage in"
     s = s + " memory and become durable at commit: one immutable checksummed WAL chunk per commit, fsynced before the write is acknowledged. Recovery replays the n"
     s = s + "ewest valid segment + its valid chunks; a torn last chunk is dropped, so a commit is all-or-nothing.\",\"loop\":[\"put --db d --doc '{...}' -> {id}\","
@@ -246,75 +247,77 @@ func cmd_guide() {
     s = s + "rdering, cursors)\",\"agg --db d --group-by status --sum score\",\"compact --db d   (fold WAL chunks into a segment; run when stats.chunks_replayed gr"
     s = s + "ows)\",\"verify --db d --coll c   (walk every file; exit 92 if anything is wrong)\",\"serve --db d --port 8801 --token T   (HTTP; add --follow for a r"
     s = s + "ead-only replica)\"],\"verbs\":{\"put\":\"--db --coll --id --doc [--ttl] -> {id}\",\"get\":\"--db --coll --id -> {id,doc}\",\"del\":\"--db --coll --id"
-    s = s + " -> {id,deleted}\",\"find\":\"--db --coll [--where] [--limit] [--order F] [--desc] [--after CURSOR] -> {count,mode,scanned,pages,[next],items}\",\"cou"
-    s = s + "nt\":\"--db --coll [--where] -> {count,mode,scanned,pages}\",\"agg\":\"--db --coll --group-by F [--sum a,b] [--minmax a,b] -> {group_by,mode,groups}\""
-    s = s + ",\"index\":\"--db --coll --field F [--sums a,b] [--range] -> {field,docs_indexed}\",\"indexes\":\"--db --coll -> declared indexes\",\"export\":\"--db "
-    s = s + "--coll [--where] -> every matching document\",\"compact\":\"--db --coll -> {gen,docs}\",\"verify\":\"--db --coll -> {intact,issues}; exit 92 when not "
-    s = s + "intact\",\"stats\":\"--db --coll -> {docs|docs_estimate,gen,runs,rss_kb,...}\",\"cold\":\"--db --coll -> convert the collection to disk-resident stora"
-    s = s + "ge\",\"serve\":\"--db --port --token [--follow] -> HTTP server (single actor)\",\"follow\":\"--from URL --rtoken T --remote-db --remote-coll --db --co"
-    s = s + "ll [--once] -> pull a remote primary into a local db\",\"bench\":\"--db --n [--vs-sqlite]\",\"torture\":\"--db --n --batch [--cold] -> crash-test writ"
-    s = s + "er used by the crash harnesses\",\"guide\":\"this document\",\"help-json\":\"machine-readable command list\"},\"http\":{\"read\":\"GET /get /find /cou"
-    s = s + "nt /agg /export /stats /verify /collections /dbs /usage /watch /health /guide\",\"write\":\"POST /put /del /bulk /index /cold /compact /tenants /shutd"
-    s = s + "own\",\"auth\":\"Authorization: Bearer <token>. No anonymous access and no token query parameter.\",\"find_params\":\"coll, where, limit, order, desc="
-    s = s + "1, after=<cursor>\",\"watch\":\"GET /watch?coll=&since=&timeout= long-polls for changes; resync=1 means you are too far behind to patch\",\"bulk\":\"P"
-    s = s + "OST /bulk?coll=C with one 'id<TAB>{json}' per line ('-<TAB>id' deletes); capped at 50000 ops, all-or-nothing\"},\"query\":{\"where\":\"comma-separated"
-    s = s + " clauses, ANDed: field=value, field~=substring, and numeric > < >= <= . Dotted paths reach nested fields (user.id=7). Values containing , or = are not"
-    s = s + " expressible — get by id.\",\"windows\":\"two clauses on one --range field (ts>=A,ts<B) fold into a single span: two binary searches, not a scan\",\"o"
-    s = s + "rdering\":\"--order F [--desc] returns the first/last N BY F instead of an arbitrary N. Requires a --range index on F; asking without one is refused w"
-    s = s + "ith the command to declare it. Ties break by id, so the order is TOTAL and the same query returns the same sequence on hot and cold.\",\"pagination\":"
-    s = s + "\"keyset, not offset: an ordered response carries `next`, and --after/?after= resumes strictly past it. Every page costs the same, and rows inserted o"
-    s = s + "r deleted elsewhere cannot make a row repeat or be skipped. `next` is omitted on a short page, which is how you know to stop. A row MODIFIED between p"
-    s = s + "ages moves in the order and can be seen twice or missed — inherent without a snapshot.\",\"cost\":\"every response reports the plan (mode) and what it"
-    s = s + " cost (scanned documents, pages read), so a caller can tell an index lookup from a scan\",\"still_scans\":\"a range clause on a field with no --range "
-    s = s + "index; any ~= substring clause; multi-clause queries whose fields are unindexed\"},\"storage\":{\"hot\":\"memtable holds the whole collection; segment"
-    s = s + "s make open fast, not memory small\",\"cold\":\"hash-partitioned pages + per-run manifests written manifest-LAST, so an interrupted write leaves an un"
-    s = s + "referenced run rather than a corrupt one\",\"indexes\":\"equality (buckets / value-partitioned pages), --range (sorted projection / sorted pages + min"
-    s = s + "-max boundaries), and O(1) count/agg registers via --sums\",\"index_builds\":\"large range-index builds spill sorted runs and k-way merge them inside "
-    s = s + "a scoped arena, so a build is not bounded by the collection size\"},\"durability\":\"a commit is fsynced before it is acknowledged: the chunk's conten"
-    s = s + "t, then the directory entry that makes it exist. A cold flush fsyncs every page before the manifest naming it. Cost ~1.9ms per commit, so ~31% on sing"
-    s = s + "le-document commits and nothing measurable on batched writes. GRANGE_FSYNC=0 opts out for rebuildable data. NOT guaranteed: that the storage DEVICE ho"
-    s = s + "nours fsync.\",\"concurrency\":\"`serve` is single-actor: one request at a time, so an expensive query is paid for by everyone behind it. Bound it wit"
-    s = s + "h GRANGE_MAX_SCAN_DOCS, and scale reads with replicas — `serve --follow` over the SAME directory is read-only and refreshes from disk on every request"
-    s = s + ". A read after an acknowledged write sees it (same-directory followers only; `follow` across machines is async).\",\"env\":{\"GRANGE_TOKEN\":\"serve: "
-    s = s + "bearer token (else --token, else generated)\",\"GRANGE_DB\":\"serve: database directory when --db is absent\",\"GRANGE_FSYNC\":\"0 disables fsync on c"
-    s = s + "ommit (faster, not crash-safe against power loss)\",\"GRANGE_MAX_SCAN_DOCS\":\"refuse a query after N documents examined; the error names the field to"
-    s = s + " index\",\"GRANGE_MAX_SCAN_PAGES\":\"same, in pages read\",\"GRANGE_MAX_RSS_MB\":\"restart the process when RSS exceeds this (watchdog)\",\"GRANGE_RES"
-    s = s + "ET_EVERY\":\"reclaim the arena every N requests instead of restarting (opt-in; off by default)\",\"GRANGE_MAX_LOADED\":\"evict least-recently-used col"
-    s = s + "lections beyond this many\",\"GRANGE_MAX_RUNS\":\"compact a cold collection when it exceeds this many runs\",\"GRANGE_COLD_MEMTABLE\":\"flush a cold c"
-    s = s + "ollection when the memtable reaches this many records\",\"GRANGE_RATE_PER_MIN\":\"per-tenant request cap (hosted)\",\"GRANGE_PRICE_CENTS_GB_MONTH\":\""
-    s = s + "hosted storage price\",\"GRANGE_MERCHANT_KEY\":\"peage merchant key for hosted billing\",\"GRANGE_FREE_BYTES\":\"hosted free storage allowance before "
-    s = s + "metering\",\"GRANGE_SORT_SPILL\":\"records per spilled run during an external index build\",\"GRANGE_SORT_EXTERNAL\":\"1/0 forces the external or in-m"
-    s = s + "emory index build (testing)\",\"GRANGE_SORT_EXTERNAL_PAGES\":\"run size in pages above which a build spills\",\"GRANGE_BULK_DIRECT\":\"1 forces the di"
-    s = s + "rect-to-run bulk path (testing)\",\"GRANGE_BULK_PASS\":\"records held per pass when writing a bulk run\",\"GRANGE_IDX_PARTS\":\"partitions per cold eq"
-    s = s + "uality index\",\"GRANGE_IDX_BATCH\":\"records per batch when building a cold index\",\"GRANGE_RANGE_PAGE\":\"entries per sorted range-index page\"},\""
-    s = s + "embed\":\"grange is usable as a LIBRARY, not only a server: compile src/engine.src registry.src cold.src coldindex.src coldrange.src coldsort.src inde"
-    s = s + "x.src range.src qcost.src query.src order.src into your own machin binary and call gr_use/gr_put/gr_commit/q_find/q_find_page directly. gr_reset() rec"
-    s = s + "laims the arena and FREES everything the caller is holding, so call it between requests with nothing in flight. scripts/embed_test.sh pins this contra"
-    s = s + "ct.\",\"edge_cases\":[\"docs must be single-line minified JSON\",\"ids: no | / newline or slash\",\"a bulk request is capped at 50000 ops and is all-o"
-    s = s + "r-nothing: a malformed line applies nothing\",\"a replica (--follow) refuses writes; two writers on one directory would corrupt it\",\"gr_reset()/aren"
-    s = s + "a reset invalidates values the caller still holds, not just grange's internals\"],\"exit_codes\":{\"0\":\"ok\",\"80-89\":\"input\",\"90-99\":\"not fou"
-    s = s + "nd\",\"92\":\"verify found corruption\",\"110-119\":\"internal\"},\"hosted\":{\"url\":\"https://grange.intrane.fr\",\"signup\":\"POST /tenants with X-"
-    s = s + "Peage-Wallet: pw_... -> isolated metered namespace + gt_ token\",\"pricing\":\"pay-as-you-go storage, 15 cents/GB/month above 50MB free, billed via pe"
-    s = s + "age (https://peage.intrane.fr/llms.txt)\"}}"
+    s = s + " -> {id,deleted}\",\"find\":\"--db --coll [--where] [--limit] [--order F] [--desc] [--after CURSOR] [--fields a,b] -> {count,mode,scanned,pages,[next]"
+    s = s + ",items}\",\"count\":\"--db --coll [--where] -> {count,mode,scanned,pages}\",\"agg\":\"--db --coll --group-by F [--sum a,b] [--minmax a,b] -> {group_by"
+    s = s + ",mode,groups}\",\"index\":\"--db --coll --field F [--sums a,b] [--range] -> {field,docs_indexed}\",\"indexes\":\"--db --coll -> declared indexes\",\"e"
+    s = s + "xport\":\"--db --coll [--where] [--fields a,b] -> every matching document\",\"compact\":\"--db --coll -> {gen,docs}\",\"verify\":\"--db --coll -> {int"
+    s = s + "act,issues}; exit 92 when not intact\",\"stats\":\"--db --coll -> {docs|docs_estimate,gen,runs,rss_kb,...}\",\"cold\":\"--db --coll -> convert the col"
+    s = s + "lection to disk-resident storage\",\"serve\":\"--db --port --token [--follow] -> HTTP server (single actor)\",\"follow\":\"--from URL --rtoken T --rem"
+    s = s + "ote-db --remote-coll --db --coll [--once] -> pull a remote primary into a local db\",\"bench\":\"--db --n [--vs-sqlite]\",\"torture\":\"--db --n --bat"
+    s = s + "ch [--cold] -> crash-test writer used by the crash harnesses\",\"guide\":\"this document\",\"help-json\":\"machine-readable command list\"},\"http\":{"
+    s = s + "\"read\":\"GET /get /find /count /agg /export /stats /verify /collections /dbs /usage /watch /health /guide\",\"write\":\"POST /put /del /bulk /index "
+    s = s + "/cold /compact /tenants /shutdown\",\"auth\":\"Authorization: Bearer <token>. No anonymous access and no token query parameter.\",\"find_params\":\"co"
+    s = s + "ll, where, limit, order, desc=1, after=<cursor>, fields=a,b\",\"watch\":\"GET /watch?coll=&since=&timeout= long-polls for changes; resync=1 means you "
+    s = s + "are too far behind to patch\",\"bulk\":\"POST /bulk?coll=C with one 'id<TAB>{json}' per line ('-<TAB>id' deletes); capped at 50000 ops, all-or-nothing"
+    s = s + "\"},\"query\":{\"where\":\"comma-separated clauses, ANDed: field=value, field~=substring, and numeric > < >= <= . Dotted paths reach nested fields (us"
+    s = s + "er.id=7). Values containing , or = are not expressible — get by id.\",\"windows\":\"two clauses on one --range field (ts>=A,ts<B) fold into a single s"
+    s = s + "pan: two binary searches, not a scan\",\"ordering\":\"--order F [--desc] returns the first/last N BY F instead of an arbitrary N. Requires a --range i"
+    s = s + "ndex on F; asking without one is refused with the command to declare it. Ties break by id, so the order is TOTAL and the same query returns the same s"
+    s = s + "equence on hot and cold.\",\"pagination\":\"keyset, not offset: an ordered response carries `next`, and --after/?after= resumes strictly past it. Ever"
+    s = s + "y page costs the same, and rows inserted or deleted elsewhere cannot make a row repeat or be skipped. `next` is omitted on a short page, which is how "
+    s = s + "you know to stop. A row MODIFIED between pages moves in the order and can be seen twice or missed — inherent without a snapshot.\",\"projection\":\"fi"
+    s = s + "elds=a,b returns only those fields; `id` is ALWAYS included, a field the document lacks is OMITTED rather than null, and a dotted path projects under "
+    s = s + "its full path (user.id) flat. Composes with ordering and cursors. Measured on 11-field documents, asking for 3 was 65% less payload — which for a call"
+    s = s + "er paying per token is the point.\",\"cost\":\"every response reports the plan (mode) and what it cost (scanned documents, pages read), so a caller ca"
+    s = s + "n tell an index lookup from a scan\",\"still_scans\":\"a range clause on a field with no --range index; any ~= substring clause; multi-clause queries "
+    s = s + "whose fields are unindexed\"},\"storage\":{\"hot\":\"memtable holds the whole collection; segments make open fast, not memory small\",\"cold\":\"hash-"
+    s = s + "partitioned pages + per-run manifests written manifest-LAST, so an interrupted write leaves an unreferenced run rather than a corrupt one\",\"indexes"
+    s = s + "\":\"equality (buckets / value-partitioned pages), --range (sorted projection / sorted pages + min-max boundaries), and O(1) count/agg registers via -"
+    s = s + "-sums\",\"index_builds\":\"large range-index builds spill sorted runs and k-way merge them inside a scoped arena, so a build is not bounded by the col"
+    s = s + "lection size\"},\"durability\":\"a commit is fsynced before it is acknowledged: the chunk's content, then the directory entry that makes it exist. A c"
+    s = s + "old flush fsyncs every page before the manifest naming it. Cost ~1.9ms per commit, so ~31% on single-document commits and nothing measurable on batche"
+    s = s + "d writes. GRANGE_FSYNC=0 opts out for rebuildable data. NOT guaranteed: that the storage DEVICE honours fsync.\",\"concurrency\":\"`serve` is single-a"
+    s = s + "ctor: one request at a time, so an expensive query is paid for by everyone behind it. Bound it with GRANGE_MAX_SCAN_DOCS, and scale reads with replica"
+    s = s + "s — `serve --follow` over the SAME directory is read-only and refreshes from disk on every request. A read after an acknowledged write sees it (same-d"
+    s = s + "irectory followers only; `follow` across machines is async).\",\"env\":{\"GRANGE_TOKEN\":\"serve: bearer token (else --token, else generated)\",\"GRAN"
+    s = s + "GE_DB\":\"serve: database directory when --db is absent\",\"GRANGE_FSYNC\":\"0 disables fsync on commit (faster, not crash-safe against power loss)\","
+    s = s + "\"GRANGE_MAX_SCAN_DOCS\":\"refuse a query after N documents examined; the error names the field to index\",\"GRANGE_MAX_SCAN_PAGES\":\"same, in pages "
+    s = s + "read\",\"GRANGE_MAX_RSS_MB\":\"restart the process when RSS exceeds this (watchdog)\",\"GRANGE_RESET_EVERY\":\"reclaim the arena every N requests inst"
+    s = s + "ead of restarting (opt-in; off by default)\",\"GRANGE_MAX_LOADED\":\"evict least-recently-used collections beyond this many\",\"GRANGE_MAX_RUNS\":\"co"
+    s = s + "mpact a cold collection when it exceeds this many runs\",\"GRANGE_COLD_MEMTABLE\":\"flush a cold collection when the memtable reaches this many record"
+    s = s + "s\",\"GRANGE_RATE_PER_MIN\":\"per-tenant request cap (hosted)\",\"GRANGE_PRICE_CENTS_GB_MONTH\":\"hosted storage price\",\"GRANGE_MERCHANT_KEY\":\"pea"
+    s = s + "ge merchant key for hosted billing\",\"GRANGE_FREE_BYTES\":\"hosted free storage allowance before metering\",\"GRANGE_SORT_SPILL\":\"records per spill"
+    s = s + "ed run during an external index build\",\"GRANGE_SORT_EXTERNAL\":\"1/0 forces the external or in-memory index build (testing)\",\"GRANGE_SORT_EXTERNAL"
+    s = s + "_PAGES\":\"run size in pages above which a build spills\",\"GRANGE_BULK_DIRECT\":\"1 forces the direct-to-run bulk path (testing)\",\"GRANGE_BULK_PASS"
+    s = s + "\":\"records held per pass when writing a bulk run\",\"GRANGE_IDX_PARTS\":\"partitions per cold equality index\",\"GRANGE_IDX_BATCH\":\"records per ba"
+    s = s + "tch when building a cold index\",\"GRANGE_RANGE_PAGE\":\"entries per sorted range-index page\"},\"embed\":\"grange is usable as a LIBRARY, not only a "
+    s = s + "server: compile src/engine.src registry.src cold.src coldindex.src coldrange.src coldsort.src index.src range.src qcost.src query.src order.src into y"
+    s = s + "our own machin binary and call gr_use/gr_put/gr_commit/q_find/q_find_page directly. gr_reset() reclaims the arena and FREES everything the caller is h"
+    s = s + "olding, so call it between requests with nothing in flight. scripts/embed_test.sh pins this contract.\",\"edge_cases\":[\"docs must be single-line min"
+    s = s + "ified JSON\",\"ids: no | / newline or slash\",\"a bulk request is capped at 50000 ops and is all-or-nothing: a malformed line applies nothing\",\"a re"
+    s = s + "plica (--follow) refuses writes; two writers on one directory would corrupt it\",\"gr_reset()/arena reset invalidates values the caller still holds, n"
+    s = s + "ot just grange's internals\"],\"exit_codes\":{\"0\":\"ok\",\"80-89\":\"input\",\"90-99\":\"not found\",\"92\":\"verify found corruption\",\"110-119\":"
+    s = s + "\"internal\"},\"hosted\":{\"url\":\"https://grange.intrane.fr\",\"signup\":\"POST /tenants with X-Peage-Wallet: pw_... -> isolated metered namespace +"
+    s = s + " gt_ token\",\"pricing\":\"pay-as-you-go storage, 15 cents/GB/month above 50MB free, billed via peage (https://peage.intrane.fr/llms.txt)\"}}"
     println(s)
 }
 
 func cmd_help_json() {
     s := ""
-    s = s + "{\"tool\":\"grange\",\"version\":\"0.10.0\",\"summary\":\"machin-native document database — agent-first, single binary, embeddable or served\",\"comma"
+    s = s + "{\"tool\":\"grange\",\"version\":\"0.11.0\",\"summary\":\"machin-native document database — agent-first, single binary, embeddable or served\",\"comma"
     s = s + "nds\":[{\"name\":\"put\",\"flags\":[\"--db\",\"--coll\",\"--id\",\"--doc\",\"--ttl\"],\"out\":\"{id}\"},{\"name\":\"get\",\"flags\":[\"--db\",\"--coll"
     s = s + "\",\"--id\"],\"out\":\"{id,doc}\"},{\"name\":\"del\",\"flags\":[\"--db\",\"--coll\",\"--id\"],\"out\":\"{id,deleted}\"},{\"name\":\"find\",\"flags\":["
-    s = s + "\"--db\",\"--coll\",\"--where\",\"--limit\",\"--order\",\"--desc\",\"--after\"],\"out\":\"{count,mode,scanned,pages,next,items}\"},{\"name\":\"count\""
-    s = s + ",\"flags\":[\"--db\",\"--coll\",\"--where\"],\"out\":\"{count,mode}\"},{\"name\":\"agg\",\"flags\":[\"--db\",\"--coll\",\"--group-by\",\"--sum\",\"--m"
-    s = s + "inmax\"],\"out\":\"{group_by,mode,groups}\"},{\"name\":\"index\",\"flags\":[\"--db\",\"--coll\",\"--field\",\"--sums\",\"--range\"],\"out\":\"{field,d"
-    s = s + "ocs_indexed}\"},{\"name\":\"indexes\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{indexes}\"},{\"name\":\"export\",\"flags\":[\"--db\",\"--coll\",\"--w"
-    s = s + "here\"],\"out\":\"{count,items}\"},{\"name\":\"compact\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{gen,docs}\"},{\"name\":\"verify\",\"flags\":[\"--d"
-    s = s + "b\",\"--coll\"],\"out\":\"{intact,issues}; exit 92 if not intact\"},{\"name\":\"stats\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{docs,gen,runs,rss_k"
-    s = s + "b}\"},{\"name\":\"cold\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{cold:true}\"},{\"name\":\"serve\",\"flags\":[\"--db\",\"--port\",\"--token\",\"--f"
-    s = s + "ollow\"],\"out\":\"HTTP server\"},{\"name\":\"follow\",\"flags\":[\"--from\",\"--rtoken\",\"--remote-db\",\"--remote-coll\",\"--db\",\"--coll\",\"--on"
-    s = s + "ce\"],\"out\":\"replication into a local db\"},{\"name\":\"bench\",\"flags\":[\"--db\",\"--n\",\"--vs-sqlite\"],\"out\":\"benchmark metrics\"},{\"name"
-    s = s + "\":\"torture\",\"flags\":[\"--db\",\"--n\",\"--batch\",\"--cold\"],\"out\":\"crash-test writer\"},{\"name\":\"guide\",\"flags\":[],\"out\":\"feature c"
-    s = s + "atalog\"},{\"name\":\"help-json\",\"flags\":[],\"out\":\"this command list\"}]}"
+    s = s + "\"--db\",\"--coll\",\"--where\",\"--limit\",\"--order\",\"--desc\",\"--after\",\"--fields\"],\"out\":\"{count,mode,scanned,pages,next,items}\"},{\"nam"
+    s = s + "e\":\"count\",\"flags\":[\"--db\",\"--coll\",\"--where\"],\"out\":\"{count,mode}\"},{\"name\":\"agg\",\"flags\":[\"--db\",\"--coll\",\"--group-by\",\""
+    s = s + "--sum\",\"--minmax\"],\"out\":\"{group_by,mode,groups}\"},{\"name\":\"index\",\"flags\":[\"--db\",\"--coll\",\"--field\",\"--sums\",\"--range\"],\"out"
+    s = s + "\":\"{field,docs_indexed}\"},{\"name\":\"indexes\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{indexes}\"},{\"name\":\"export\",\"flags\":[\"--db\",\"-"
+    s = s + "-coll\",\"--where\",\"--fields\"],\"out\":\"{count,items}\"},{\"name\":\"compact\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{gen,docs}\"},{\"name\":"
+    s = s + "\"verify\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{intact,issues}; exit 92 if not intact\"},{\"name\":\"stats\",\"flags\":[\"--db\",\"--coll\"],\"o"
+    s = s + "ut\":\"{docs,gen,runs,rss_kb}\"},{\"name\":\"cold\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{cold:true}\"},{\"name\":\"serve\",\"flags\":[\"--db\","
+    s = s + "\"--port\",\"--token\",\"--follow\"],\"out\":\"HTTP server\"},{\"name\":\"follow\",\"flags\":[\"--from\",\"--rtoken\",\"--remote-db\",\"--remote-coll"
+    s = s + "\",\"--db\",\"--coll\",\"--once\"],\"out\":\"replication into a local db\"},{\"name\":\"bench\",\"flags\":[\"--db\",\"--n\",\"--vs-sqlite\"],\"out\":"
+    s = s + "\"benchmark metrics\"},{\"name\":\"torture\",\"flags\":[\"--db\",\"--n\",\"--batch\",\"--cold\"],\"out\":\"crash-test writer\"},{\"name\":\"guide\",\""
+    s = s + "flags\":[],\"out\":\"feature catalog\"},{\"name\":\"help-json\",\"flags\":[],\"out\":\"this command list\"}]}"
     println(s)
 }
 
@@ -329,6 +332,7 @@ func main() {
     fs = flag_str(fs, "order", "o", "", "order results by a --range-indexed field (prefix - for descending)")
     fs = flag_bool(fs, "desc", "", "order descending (newest/highest first)")
     fs = flag_str(fs, "after", "", "", "resume after this cursor (the `next` from the previous page)")
+    fs = flag_str(fs, "fields", "", "", "find/export: return only these fields (comma-separated; id is always included)")
     fs = flag_int(fs, "ttl", "T", "0", "put: doc lifetime in seconds (0 = forever)")
     fs = flag_int(fs, "n", "n", "100000", "bench/torture record count")
     fs = flag_int(fs, "batch", "b", "1000", "commit batch size")
@@ -359,7 +363,7 @@ func main() {
     if verb == "get" { cmd_get(fs)  return }
     if verb == "del" { cmd_del(fs)  return }
     if verb == "find" { cmd_find(fs)  return }
-    if verb == "export" { do_open(fs)  emit_ok(q_find(flag_get(fs, "where"), 0))  return }
+    if verb == "export" { do_open(fs)  proj_set(flag_get(fs, "fields"))  emit_ok(q_find(flag_get(fs, "where"), 0))  return }
     if verb == "count" { cmd_count(fs)  return }
     if verb == "compact" { cmd_compact(fs)  return }
     if verb == "cold" {

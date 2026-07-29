@@ -255,6 +255,9 @@ func srv_handle(req) (res) {
         if limit == 0 { limit = 100 }
         wh := query(req, "where")
         q_warm(wh)
+        // ?fields=a,b returns only those fields (id is always included). Set
+        // before the query runs, because projection happens at emit time.
+        proj_set(query(req, "fields"))
         // the query reads pages and builds strings that die with the response;
         // only the body escapes, so the loop's arena stays flat (machin escape())
         body := ""

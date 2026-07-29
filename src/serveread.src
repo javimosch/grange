@@ -43,6 +43,7 @@ func srv_tail_routes(req) (res, handled) {
         }
         wh := query(req, "where")
         q_warm(wh)
+        proj_set(query(req, "fields"))
         body := ""
         arena { body = escape(q_find(wh, 0)) }
         if q_aborted() == 1 {

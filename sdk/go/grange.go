@@ -169,6 +169,13 @@ func (c *Client) FindOrdered(where string, limit int, order string, desc bool) (
 // Next. Keyset pagination, so every page costs the same and rows inserted or
 // deleted elsewhere cannot shift the position the way an offset would.
 func (c *Client) FindPage(where string, limit int, order string, desc bool, after string) (*FindResult, error) {
+	return c.FindFields(where, limit, order, desc, after, "")
+}
+
+// FindFields adds projection: fields is a comma-separated list, and only those
+// are returned (id always is). On an 11-field document, asking for 3 is ~65%
+// less payload.
+func (c *Client) FindFields(where string, limit int, order string, desc bool, after, fields string) (*FindResult, error) {
 	var out FindResult
 	q := fmt.Sprintf("/find?%s&where=%s&limit=%d&order=%s", c.qs(), url.QueryEscape(where), limit, url.QueryEscape(order))
 	if desc {
@@ -176,6 +183,9 @@ func (c *Client) FindPage(where string, limit int, order string, desc bool, afte
 	}
 	if after != "" {
 		q += "&after=" + url.QueryEscape(after)
+	}
+	if fields != "" {
+		q += "&fields=" + url.QueryEscape(fields)
 	}
 	err := c.do("GET", q, nil, &out)
 	return &out, err

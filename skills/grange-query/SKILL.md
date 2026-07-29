@@ -77,6 +77,20 @@ The honest limit: a row **modified** between pages moves in the order and can be
 seen twice or missed. That is inherent to reading a changing collection without
 a snapshot.
 
+## Ask for the fields you need
+
+```sh
+grange find --db d --coll events --order ts --desc --limit 50 --fields ts,site,path
+```
+
+`id` is always returned. A field the document lacks is **omitted, not null** —
+grange does not invent structure. A dotted path projects under its full path
+(`user.id`) as a flat key. It composes with ordering and cursors.
+
+Measured on the live analytics mirror, whose events carry 11 fields: asking for
+the 3 a dashboard needs took 5 rows from 1255 bytes to 439 — **65% smaller**. If
+you are paying per token, ask for fields.
+
 ## What still scans
 
 - a range clause on a field with no `--range` index

@@ -281,6 +281,12 @@ make verify   # check + tests (69) + 100k bench + crash harness
   ordering an entire large collection. Declaring a range index no longer holds the whole field in
   memory: large builds spill sorted runs and merge them a page at a time inside a scoped arena
   (measured over 200k documents, build RSS +160 MB -> -11 MB, byte-identical output).
+- PROJECTION: `?fields=a,b` (`--fields`, or `fields` in every SDK) returns only those fields. `id` is
+  always included, a field the document lacks is omitted rather than null, and a dotted path
+  projects under its full path (`user.id`) flat. Measured on the live analytics mirror, whose
+  events carry 11 fields: asking for the 3 a dashboard needs took 5 rows from 1255 to 439 bytes —
+  65% smaller, on every request. `make projection` asserts the projected answer equals the full
+  answer reduced to those fields, on both storage modes and every plan.
 - PAGINATION is keyset, not offset: an ordered response carries `next`, and `?after=<cursor>`
   (`--after`, or `pages()` / `FindPage` in the SDKs) resumes strictly past it. Every page costs
   the same — an offset has to walk the rows it skips, so page 500 would cost 500x page 1 — and a

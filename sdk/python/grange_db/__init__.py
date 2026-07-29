@@ -86,7 +86,7 @@ class Grange:
     def delete(self, id):
         self._req("POST", "/del", {"db": self._db, "coll": self._coll, "id": id})
 
-    def find(self, where="", limit=100, order="", desc=False, after=""):
+    def find(self, where="", limit=100, order="", desc=False, after="", fields=""):
         """where: "f=v,f2>=v2" (ANDed; = > < >= <=). -> {count, mode, items}
 
         order: a --range-indexed field to order by; desc=True for newest/highest
@@ -97,9 +97,12 @@ class Grange:
             q += f"&order={_up.quote(order)}" + ("&desc=1" if desc else "")
         if after:
             q += f"&after={_up.quote(after)}"
+        if fields:
+            f = ",".join(fields) if isinstance(fields, (list, tuple)) else fields
+            q += f"&fields={_up.quote(f)}"
         return self._req("GET", q)
 
-    def pages(self, where="", limit=100, order="", desc=False):
+    def pages(self, where="", limit=100, order="", desc=False, fields=""):
         """Iterate every document of an ordered query, page by page.
 
         Keyset pagination: `after` is the previous page's `next` cursor, so each
@@ -108,7 +111,7 @@ class Grange:
         """
         after = ""
         while True:
-            page = self.find(where, limit=limit, order=order, desc=desc, after=after)
+            page = self.find(where, limit=limit, order=order, desc=desc, after=after, fields=fields)
             for item in page["items"]:
                 yield item
             after = page.get("next", "")

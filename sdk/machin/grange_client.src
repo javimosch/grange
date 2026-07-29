@@ -90,9 +90,16 @@ func grange_find_ordered(g, where, limit, order, desc) (data) {
 // pagination: every page costs the same, and rows inserted or deleted elsewhere
 // cannot shift the position the way an offset would.
 func grange_find_page(g, where, limit, order, desc, after) (data) {
+    data = grange_find_fields(g, where, limit, order, desc, after, "")
+}
+
+// grange_find_fields adds projection: only `fields` (comma-separated) are
+// returned, and id always is.
+func grange_find_fields(g, where, limit, order, desc, after, fields) (data) {
     q := "/find?" + grange_qs(g) + "&where=" + url_encode(where) + "&limit=" + str(limit) + "&order=" + url_encode(order)
     if desc == 1 { q = q + "&desc=1" }
     if len(after) > 0 { q = q + "&after=" + url_encode(after) }
+    if len(fields) > 0 { q = q + "&fields=" + url_encode(fields) }
     status, resp := grange_req(g, "GET", q, "")
     data = grange_data(status, resp)
 }

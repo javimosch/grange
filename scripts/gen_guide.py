@@ -20,7 +20,7 @@ import re
 import sys
 from pathlib import Path
 
-VERSION = "0.10.0"
+VERSION = "0.11.0"
 
 GUIDE = {
     "tool": "grange",
@@ -51,12 +51,12 @@ GUIDE = {
         "put": "--db --coll --id --doc [--ttl] -> {id}",
         "get": "--db --coll --id -> {id,doc}",
         "del": "--db --coll --id -> {id,deleted}",
-        "find": "--db --coll [--where] [--limit] [--order F] [--desc] [--after CURSOR] -> {count,mode,scanned,pages,[next],items}",
+        "find": "--db --coll [--where] [--limit] [--order F] [--desc] [--after CURSOR] [--fields a,b] -> {count,mode,scanned,pages,[next],items}",
         "count": "--db --coll [--where] -> {count,mode,scanned,pages}",
         "agg": "--db --coll --group-by F [--sum a,b] [--minmax a,b] -> {group_by,mode,groups}",
         "index": "--db --coll --field F [--sums a,b] [--range] -> {field,docs_indexed}",
         "indexes": "--db --coll -> declared indexes",
-        "export": "--db --coll [--where] -> every matching document",
+        "export": "--db --coll [--where] [--fields a,b] -> every matching document",
         "compact": "--db --coll -> {gen,docs}",
         "verify": "--db --coll -> {intact,issues}; exit 92 when not intact",
         "stats": "--db --coll -> {docs|docs_estimate,gen,runs,rss_kb,...}",
@@ -72,7 +72,7 @@ GUIDE = {
         "read": "GET /get /find /count /agg /export /stats /verify /collections /dbs /usage /watch /health /guide",
         "write": "POST /put /del /bulk /index /cold /compact /tenants /shutdown",
         "auth": "Authorization: Bearer <token>. No anonymous access and no token query parameter.",
-        "find_params": "coll, where, limit, order, desc=1, after=<cursor>",
+        "find_params": "coll, where, limit, order, desc=1, after=<cursor>, fields=a,b",
         "watch": "GET /watch?coll=&since=&timeout= long-polls for changes; resync=1 means you are too far behind to patch",
         "bulk": "POST /bulk?coll=C with one 'id<TAB>{json}' per line ('-<TAB>id' deletes); capped at 50000 ops, all-or-nothing",
     },
@@ -95,6 +95,12 @@ GUIDE = {
             "cannot make a row repeat or be skipped. `next` is omitted on a short page, which is how "
             "you know to stop. A row MODIFIED between pages moves in the order and can be seen twice "
             "or missed — inherent without a snapshot."
+        ),
+        "projection": (
+            "fields=a,b returns only those fields; `id` is ALWAYS included, a field the document "
+            "lacks is OMITTED rather than null, and a dotted path projects under its full path "
+            "(user.id) flat. Composes with ordering and cursors. Measured on 11-field documents, "
+            "asking for 3 was 65% less payload — which for a caller paying per token is the point."
         ),
         "cost": "every response reports the plan (mode) and what it cost (scanned documents, pages read), so a caller can tell an index lookup from a scan",
         "still_scans": "a range clause on a field with no --range index; any ~= substring clause; multi-clause queries whose fields are unindexed",
@@ -173,12 +179,12 @@ HELP = {
         {"name": "put", "flags": ["--db", "--coll", "--id", "--doc", "--ttl"], "out": "{id}"},
         {"name": "get", "flags": ["--db", "--coll", "--id"], "out": "{id,doc}"},
         {"name": "del", "flags": ["--db", "--coll", "--id"], "out": "{id,deleted}"},
-        {"name": "find", "flags": ["--db", "--coll", "--where", "--limit", "--order", "--desc", "--after"], "out": "{count,mode,scanned,pages,next,items}"},
+        {"name": "find", "flags": ["--db", "--coll", "--where", "--limit", "--order", "--desc", "--after", "--fields"], "out": "{count,mode,scanned,pages,next,items}"},
         {"name": "count", "flags": ["--db", "--coll", "--where"], "out": "{count,mode}"},
         {"name": "agg", "flags": ["--db", "--coll", "--group-by", "--sum", "--minmax"], "out": "{group_by,mode,groups}"},
         {"name": "index", "flags": ["--db", "--coll", "--field", "--sums", "--range"], "out": "{field,docs_indexed}"},
         {"name": "indexes", "flags": ["--db", "--coll"], "out": "{indexes}"},
-        {"name": "export", "flags": ["--db", "--coll", "--where"], "out": "{count,items}"},
+        {"name": "export", "flags": ["--db", "--coll", "--where", "--fields"], "out": "{count,items}"},
         {"name": "compact", "flags": ["--db", "--coll"], "out": "{gen,docs}"},
         {"name": "verify", "flags": ["--db", "--coll"], "out": "{intact,issues}; exit 92 if not intact"},
         {"name": "stats", "flags": ["--db", "--coll"], "out": "{docs,gen,runs,rss_kb}"},
@@ -226,7 +232,11 @@ def emit(fn, obj):
 def main():
     cli = Path(__file__).resolve().parent.parent / "src" / "cli.src"
     src = cli.read_text()
-    start = src.index("func cmd_guide() {")
+    # Idempotent: replace from the generated marker if it is already there.
+    # Anchoring on "func cmd_guide" instead appended a SECOND grange_version on
+    # the next run, because the marker block sits above it.
+    marker = "// GENERATED by scripts/gen_guide.py"
+    start = src.index(marker) if marker in src else src.index("func cmd_guide() {")
     end = src.index("func main() {")
     header = (
         "// GENERATED by scripts/gen_guide.py — edit the content there and re-run.\n"
