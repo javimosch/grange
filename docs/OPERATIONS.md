@@ -959,3 +959,53 @@ Two things not to do:
 with the primary, refuse writes, receive writes promptly, and that a scan on one
 replica leaves the others and the primary alone — plus that the replica serving
 the scan DOES slow down, without which the isolation checks would be vacuous.
+
+## M41: making the guide tell the truth, and keeping it that way
+
+grange is agent-first, so `grange guide` IS the interface documentation. It had
+drifted, silently, for ten milestones:
+
+- it reported **version 0.1.0**
+- it stated **"no fsync builtin yet — OS-crash durability is best-effort"**,
+  which M30 had made false and asserted false at the syscall level
+- it listed **12 of 19 verbs**, omitting cold storage, range indexes, ordering,
+  pagination, cost accounting, scan budgets, replicas, verify, watch, bulk and
+  export
+
+An agent reading that was actively misled — told the database was not durable
+when it is, and unaware of half the product. Nothing caught it because nothing
+compared the guide against the source.
+
+### The guide is generated now
+
+`scripts/gen_guide.py` holds the content and writes `cmd_guide` / `cmd_help_json`
+into `src/cli.src`. Eight kilobytes of hand-escaped JSON inside MFL string
+literals is how it rotted in the first place; the version now lives in one place
+(`grange_version()`) rather than being duplicated in both documents.
+
+Writing the generator produced its own lesson: the first chunker split a `\"`
+escape across two string literals, which the compiler reported as unbalanced
+braces a hundred lines away. It now refuses to end a chunk on an odd run of
+backslashes, and self-checks that the chunks rejoin to the original.
+
+### The guard
+
+`scripts/guide_test.sh` (`make guide`, in `make verify`) fails when anything in
+`src/` is absent from the guide: every verb the CLI dispatches, every HTTP route
+the server answers, every `GRANGE_*` variable the code reads. It also pins the
+two claims that were WRONG rather than missing, so they cannot return, and
+checks that `guide` and `help-json` agree on the version and the verb list —
+they had drifted apart too.
+
+It is deliberately mechanical: it cannot check that the prose is TRUE, only that
+nothing is missing, which is the failure that actually occurred. Verified
+against the old guide, where it reports every missing verb.
+
+### In-repo skills
+
+`skills/grange-query`, `skills/grange-operate`, `skills/grange-embed` — so a
+future session picks this up via `skills_match` instead of re-deriving it. They
+carry the things that cost time to learn: read the `mode`/`scanned`/`pages`
+fields, ordering needs a `--range` index, pagination is keyset, `gr_reset()`
+frees what the CALLER holds, check WHICH binary answered, and do not burst-probe
+a live instance because the rate limiter makes the numbers meaningless.
