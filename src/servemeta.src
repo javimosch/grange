@@ -13,16 +13,6 @@
 func srv_meta_routes(req, role, tid, root) (res, handled) {
     res = srv_err("404 Not Found", "not-found", "unreachable")
     handled = 1
-    if role == "tenant" {
-        dbname := query(req, "db")
-        if len(dbname) == 0 { dbname = srv_body_str(req, "db") }
-        if len(dbname) == 0 { dbname = "default" }
-        if valid_id(dbname) == 0 || contains(dbname, ".") {
-            res = srv_err("400 Bad Request", "input", "bad db name")
-            return
-        }
-        root = tn_root(tid) + "/" + dbname
-    }
     if role == "tenant" && req.method == "GET" && has_prefix(req.path, "/dbs") {
         entries := list_dir(tn_root(tid))
         items := []string{}

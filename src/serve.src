@@ -124,6 +124,21 @@ func srv_handle(req) (res) {
     if g_srv_follow == 0 { tn_sweep() }
     // tenants get a two-level namespace: db (?db=, default "default") / collection
     root := g_srv_db
+    // A TENANT's data lives under its own root, and resolving it MUST happen
+    // here. The account routes below take `root` BY VALUE, so doing it there
+    // assigned a copy that was discarded on return, and every tenant data
+    // request silently opened the ADMIN root — which reached production as
+    // "docs": 0 on a collection holding 1123 documents.
+    if role == "tenant" {
+        dbname := query(req, "db")
+        if len(dbname) == 0 { dbname = srv_body_str(req, "db") }
+        if len(dbname) == 0 { dbname = "default" }
+        if valid_id(dbname) == 0 || contains(dbname, ".") {
+            res = srv_err("400 Bad Request", "input", "bad db name")
+            return
+        }
+        root = tn_root(tid) + "/" + dbname
+    }
     mres, mhandled := srv_meta_routes(req, role, tid, root)
     if mhandled == 1 {
         res = mres

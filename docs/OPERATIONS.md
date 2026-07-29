@@ -1071,3 +1071,42 @@ boundary.
 The harnesses earned their place again: `make routes` after every split, and
 `make embed` caught that poche's build list needed the four new files — which
 is exactly the drift that broke poche silently before it existed.
+
+### The split that broke production
+
+The `serve.src` cut shipped a regression. Extracting the account routes carried
+this with them:
+
+```
+if role == "tenant" {
+    ...
+    root = tn_root(tid) + "/" + dbname
+}
+```
+
+That resolves a tenant's data directory, and in a callee taking `root` BY VALUE
+it assigns a copy that is discarded on return. Every tenant data request then
+opened the ADMIN root instead. On dk1 that surfaced as `stats` reporting
+`docs: 0` for a collection holding 1123 documents, and ordering failing with
+"needs a range index" on a collection that had one.
+
+The data was never at risk — the CLI read all 1123 documents from the same
+directory throughout, which is how I knew within a minute that this was a
+resolution bug and not corruption.
+
+**Why the gate missed it.** Every harness drives a single-tenant server with
+`--db`. Nothing performed a tenant DATA query, so the entire tenant path — the
+one the hosted product runs on — was untested beyond signup and rate limits.
+`caps_test.sh` now stores and reads a tenant's own data across two databases,
+and asserts it lands under the tenant's root on disk.
+
+**And a lesson about the negative control.** Write-then-read cannot detect this:
+with the root misresolved, writes and reads use the same wrong directory and
+agree perfectly. What catches it is the second database — with the bug, both
+resolve to the same root and the second sees three documents instead of one.
+
+Two of my attempts at that control were themselves broken: one removed the wrong
+`if role == "tenant"` block, and one built with output suppressed so a failed
+build left the good binary in place and everything "passed". Injecting the exact
+production failure — commenting out the one assignment — is what finally proved
+the harness works.
