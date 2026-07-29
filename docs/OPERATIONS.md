@@ -893,3 +893,69 @@ So the operator opts in, with the numbers above to decide from.
 auth still enforced, cold pages still walkable, export still complete — and
 prints the memory numbers without asserting a winner, because encoding a
 workload-dependent claim as a test would be a lie in test form.
+
+## M40: read replicas — one writer, N readers, one directory
+
+`grange serve` is single-actor, so on one server an expensive query is paid for
+by everyone behind it: M31 measured an 0.2 ms get becoming 85 ms while ONE
+unindexed scan ran, and bounded it with scan budgets rather than removing it.
+The doc named replicas as the honest fix, because the mechanism already existed
+and the replication fuzz already exercised it.
+
+    grange serve --db /data/db --port 8801 --token $TOK             # writer
+    grange serve --db /data/db --port 8802 --token $TOK --follow    # reader
+    grange serve --db /data/db --port 8803 --token $TOK --follow    # reader
+
+Same directory. A `--follow` server is read-only — it REFUSES writes, which is a
+safety property rather than a nicety: two writers on one directory would corrupt
+it. Route writes to the writer port and reads to the readers.
+
+### What this buys, measured
+
+30k-document cold collection, an unindexed scan looping on replica1:
+
+| | get p90 |
+|---|---|
+| replica2 (idle baseline) | 0.3 ms |
+| replica2, while replica1 scans | **0.4 ms** |
+| primary, while replica1 scans | **0.3 ms** |
+| replica1, which is serving the scan | 25.5 ms |
+
+The expensive query is confined to the replica serving it. On a single server the
+same workload took an 0.2 ms get to 85 ms.
+
+### Staleness: better than async replication, and here is why
+
+A local follower re-reads from disk on every request, and a write is fsynced
+before the primary acknowledges it (M30). So a read issued AFTER an acknowledged
+write sees that write: 30 out of 30 writes were visible on a replica on the very
+next request, with no wait.
+
+That is a property of THIS topology — followers over the same directory. It does
+NOT extend to `grange follow`, which pulls from a remote primary over `/watch`
+into its own directory and is genuinely asynchronous. Use same-directory
+followers for read scale-out on one host; use `grange follow` for a replica on
+another machine, and expect real lag there.
+
+The guarantee also depends on the client waiting for the write's response. A
+client that fires a write and reads a replica without waiting can miss it.
+
+### Deploying it
+
+dk1 already has the app registered from an earlier experiment
+(`grange-read` → `read.grange.intrane.fr`, port 8802). A replica needs the same
+`--db`, the same `--token`, and `--follow`; give it its own systemd unit with
+`Restart=always`, exactly like the writer.
+
+Two things not to do:
+
+- do not point a replica at a COPY of the directory — it must be the same one,
+  or it serves stale data forever
+- do not give a replica `GRANGE_RESET_EVERY` and a generated token: the token
+  cannot be re-derived after an arena reset (M38), and the reset is disabled in
+  that case anyway
+
+`scripts/replicas_test.sh` (`make replicas`) asserts all of it: replicas agree
+with the primary, refuse writes, receive writes promptly, and that a scan on one
+replica leaves the others and the primary alone — plus that the replica serving
+the scan DOES slow down, without which the isolation checks would be vacuous.

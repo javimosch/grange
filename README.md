@@ -276,6 +276,14 @@ make verify   # check + tests (69) + 100k bench + crash harness
   default: self-hosted grange is one tenant's own machine. This bounds the blast radius; it does
   not make reads concurrent — see [docs/CONCURRENCY.md](docs/CONCURRENCY.md), which also records
   why the mailbox design drafted there would NOT have fixed the measured problem.
+- READ REPLICAS: `serve --follow` over the same directory is read-only and refreshes from disk on
+  every request. Route writes to the writer and reads to N followers, and an expensive query is
+  confined to the replica serving it — measured with a scan looping on one replica, another
+  replica's get p90 stayed at 0.4 ms and the primary's at 0.3 ms, where a single server took an
+  0.2 ms get to 85 ms. Because a write is fsynced before it is acknowledged and a follower
+  re-reads on each request, a read after an acknowledged write sees it (30/30, no wait) — that
+  is same-directory followers only; `grange follow` across machines is genuinely async.
+  `make replicas`.
 - Metering charges storage only (no per-query fees); billing sweeps piggyback on requests every 6h.
 
 MIT.
