@@ -418,10 +418,14 @@ func cmd_serve(fs) {
     if generated == 1 { g_reset_ok = 0 }
     if len(srv_argv_flag("--db")) == 0 && len(env("GRANGE_DB")) == 0 { g_reset_ok = 0 }
     harden(16777216, 30000)
-    println("{\"event\":\"listening\",\"port\":" + str(port) + ",\"db\":\"" + jesc(flag_get(fs, "db")) + "\",\"coll\":\"" + jesc(flag_get(fs, "coll")) + "\",\"docs\":" + str(gr_count()) + ",\"token\":\"" + g_srv_token + "\"}")
-    flush()
     server := listen(port)
     socket_timeout(server, 250)
+    // Announced AFTER the bind, on purpose. This line used to print first, so a
+    // port collision logged {"event":"listening"} and then exited 1 — anything
+    // reading the log (a supervisor, an agent, a person) was told the server was
+    // up by the process that had just failed to start.
+    println("{\"event\":\"listening\",\"port\":" + str(port) + ",\"db\":\"" + jesc(flag_get(fs, "db")) + "\",\"coll\":\"" + jesc(flag_get(fs, "coll")) + "\",\"docs\":" + str(gr_count()) + ",\"token\":\"" + g_srv_token + "\"}")
+    flush()
     for {
         conn := accept(server)
         if conn >= 0 {

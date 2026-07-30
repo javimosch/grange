@@ -56,6 +56,41 @@ except Exception:
     print("http %s, unparseable body" % "'"$CODE"'")' 2>/dev/null || echo "http $CODE")
 fi
 
+# A sibling unit stuck in a restart loop produces NO signal anywhere: /health is
+# in-process and knows nothing about systemd, /ready knows nothing about the
+# other units, and the external monitor only polls the healthy one. M49 found
+# grange-follower.service failing every two seconds for as long as it had
+# existed, next to a grange-read.service that was fine. This asks systemd
+# directly, for grange units only, and folds the answer into the same alert.
+LOOPING=""
+# SYSTEMCTL is overridable so this branch can be exercised by a test with a stub:
+# a restart-loop check that has never been seen to fire is a check nobody has
+# tested, and this project has shipped five of those.
+SYSTEMCTL="${SYSTEMCTL:-systemctl}"
+if command -v "$SYSTEMCTL" >/dev/null 2>&1; then
+  LOOPING=$($SYSTEMCTL list-units --type=service --all --no-legend --plain 'grange*' 2>/dev/null \
+            | awk '$3 == "failed" || $3 == "activating" { print $1 }' | tr '\n' ' ' | sed 's/ $//')
+  # `activating` is normal for a second or two after a restart, so confirm it is
+  # actually looping rather than merely starting — otherwise this alerts on every
+  # deploy, which is the fastest way to get itself muted.
+  if [ -n "$LOOPING" ]; then
+    CONFIRM=""
+    for u in $LOOPING; do
+      NR=$($SYSTEMCTL show -p NRestarts --value "$u" 2>/dev/null || echo 0)
+      ST=$($SYSTEMCTL show -p ActiveState --value "$u" 2>/dev/null || echo "")
+      if [ "$ST" = "failed" ] || { [ "${NR:-0}" -gt 3 ] 2>/dev/null && [ "$ST" != "active" ]; }; then
+        CONFIRM="$CONFIRM $u(restarts=$NR,$ST)"
+      fi
+    done
+    LOOPING=$(printf '%s' "$CONFIRM" | sed 's/^ //')
+  fi
+fi
+if [ -n "$LOOPING" ]; then
+  # a sick sibling does not make THIS server unready, but it must be reported
+  [ "$NOW" = "ok" ] && NOW="sibling-failing"
+  DETAIL="$DETAIL; units failing:$LOOPING"
+fi
+
 WAS=$(cat "$STATE" 2>/dev/null || echo "unknown")
 echo "$NOW" > "$STATE" 2>/dev/null || true
 
@@ -78,5 +113,5 @@ fi
 # `transition` is whether the state CHANGED; `notified` is whether a message was
 # actually sent. Reporting one as the other made the first run claim it had
 # alerted when it deliberately had not.
-echo "{\"state\":\"$NOW\",\"previous\":\"$WAS\",\"http\":\"$CODE\",\"detail\":\"$DETAIL\",\"transition\":$([ "$NOW" != "$WAS" ] && echo true || echo false),\"notified\":$SENT}"
+echo "{\"state\":\"$NOW\",\"previous\":\"$WAS\",\"http\":\"$CODE\",\"units_failing\":\"$LOOPING\",\"detail\":\"$DETAIL\",\"transition\":$([ "$NOW" != "$WAS" ] && echo true || echo false),\"notified\":$SENT}"
 [ "$NOW" = "ok" ] || exit 1

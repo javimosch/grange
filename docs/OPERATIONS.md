@@ -1286,3 +1286,83 @@ Not by inspection. A negative control in the M47 journey harness renamed a
 documented route to `/counter` to prove the harness could detect a contract
 advertising something that does not exist — and the harness passed, because
 `/counter` genuinely answered. The control refusing to fail was the bug report.
+
+## M49: the restore drill, and two things production was doing quietly
+
+### A backup nobody has restored from is a hypothesis
+
+`make backup` proves the backup *script* works against a database it just built.
+That is a different claim from "the artifact sitting on this host right now can
+be restored", and the usual way people discover the difference is during an
+incident.
+
+`scripts/restore_drill.sh` takes the NEWEST artifact on the host, restores it
+into a temp directory, and compares it to the live database collection by
+collection — document counts and `verify` integrity, admin collections *and*
+tenant ones, which are the collections that are somebody's paid data. Then it
+writes a document to the restored copy, because restoring into a read-only
+museum piece is not a recovery. It touches nothing live.
+
+On dk1:
+
+```
+{"ok":true,"backup":"20260730T080333Z","age_hours":4,"admin_collections_checked":1,
+ "tenant_collections_checked":7,"writable_after_restore":true}
+```
+
+The first run reported a failure: `tenant_dbs_absent_from_backup:
+tcb3642b0d1ee/default/` — a tenant that had signed up twenty minutes *after* the
+artifact was taken, during the M47 journey probe. A drill that cries wolf gets
+muted, so it now compares against what existed when the artifact was taken
+(`newer_than_backup`). A restore holding FEWER documents than live is expected
+(writes since the backup); more would mean the artifact is not a prefix of this
+database, and that is still a failure.
+
+### The server announced "listening" before it had bound
+
+The startup line was printed before `listen(port)`. On a port collision the
+process logged
+
+```
+{"event":"listening","port":8802,...}
+bind: Address already in use
+```
+
+and exited 1. Anything reading that log — a supervisor, an agent, a person —
+was told the server was up by the process that had just failed to start. The
+announcement now happens after the bind.
+
+### Two systemd units were fighting over port 8802
+
+`grange-read.service` and `grange-follower.service` had the same ExecStart. The
+first held the port; the second had been failing and restarting every two
+seconds, for as long as both existed, writing a bind error to the journal each
+time. Nothing alerted, because the unit that mattered was healthy and `/health`
+knew nothing about it.
+
+`grange-read` is the one to keep — it carries `GRANGE_MAX_RSS_MB=100` and
+`GRANGE_MAX_SCAN_DOCS=50000`, which the bare duplicate did not. The duplicate is
+disabled and its unit file moved to
+`/home/dk1/grange/grange-follower.service.removed-M49`.
+
+The lesson is not about a duplicate unit. It is that a permanently failing
+service next to a healthy one produced no signal anywhere — worth a check that
+asks systemd whether anything on this host is in a restart loop, rather than
+asking each service whether it personally feels well.
+
+### What the IN clause does on real data
+
+The vigie mirror, 1258 events, no equality index on the probed fields:
+
+```
+device=desktop         1199   cold-scan
+device=mobile            59   cold-scan
+device=desktop|mobile  1258   cold-scan     <- 1199 + 59, exactly
+browser=chrome|firefox  801   cold-scan
+browser=chrome|firefox,ts>=1785283000  163  cold-index
+```
+
+Honest reading: alternatives only *avoid* a scan when the field carries an
+equality index — production declares neither `device` nor `browser`, so those
+queries scan, exactly as `guide`'s `still_scans` says. The union is a planning
+win where an index exists, not everywhere.
