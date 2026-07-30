@@ -1205,3 +1205,50 @@ Verified end to end on dk1: the first timer run caught a restarting server as
 `failing`, the next saw `ok`, and the transition sent a recovery notice.
 `/ready` on the primary reports `backup_age_hours: 0` against the nightly job,
 and the replica correctly reports `role: follower`.
+
+## M47: the agent journey, walked end to end
+
+Every other harness tests a capability. This one tests the PRODUCT: the path a
+stranger's agent actually walks, using only what the published contract tells it,
+in the order the contract tells it — find the URL, read `/llms.txt`, mint a
+payment-rail wallet, sign up, write, index, query, and check the bill.
+
+That path crosses the parts nothing else covered: the unauthenticated contract,
+tenant signup, the per-tenant data root, metering, and the client SDK.
+
+**Walked against the live instance**, not just locally: minted a real peage
+wallet, signed up at grange.intrane.fr, wrote two documents, declared a range
+index, ran an ordered + projected query (`mode: range-ordered`), and read
+`/usage` — 134 bytes against a 52,428,800-byte free allowance, `accrued_cents: 0`.
+Then the same queries through `pip install grange-db`, which the contract
+advertises and which was only publishable an hour earlier.
+
+`make journey` runs it against a local server; `--live` walks the hosted one.
+
+### Three versions of one check were theatre
+
+The check "every route the contract advertises exists" took four attempts, and
+the failures are instructive because each *passed* while proving nothing:
+
+1. **Grepping `/llms.txt` for route names.** Removing the documented `COUNT`
+   entry still passed, because `/count` appears in unrelated lines.
+2. **Probing every route with GET.** Reported six healthy POST-only routes as
+   missing.
+3. **Extracting the method with `(-X POST )?\$G/…`.** The contract writes
+   `-X POST "$G/bulk?…"` with a quote between the method and the URL, so those
+   were classified GET and reported missing.
+4. **Renaming a documented route to `/counter` as a negative control.** Still
+   passed — and that one was not the harness's fault (below).
+
+It now extracts each advertised route WITH its documented method, probes 18 of
+them, and a control that renames one to `/zzznope` fails as it should.
+
+### grange routes by prefix, so a typo silently succeeds
+
+Attempt 4 failed because `/counter` genuinely answers: most routes match with
+`has_prefix(req.path, "/count")`, since `req.path` carries the query string. So
+`/counter` and `/countXYZ` both return a count, while `/healthzzz` correctly
+404s because `/health` is matched exactly.
+
+An agent that typos a route gets a plausible answer and never learns. That is
+worth fixing, and it is the next milestone rather than a footnote here.
