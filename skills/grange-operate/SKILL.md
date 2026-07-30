@@ -75,6 +75,23 @@ manifest-vs-pages agreement, declared indexes — and exits 92 when anything is
 wrong. Run it after moving a database between machines, and in any backup job:
 it catches damage in files a query happens not to read.
 
+## Publishing the SDKs
+
+```sh
+# PyPI — the token is at ~/.pypi (NOT ~/.pypirc; looking for the wrong filename
+# is how this was twice reported as "needs the user" when it did not)
+cd sdk/python && rm -rf dist && /usr/bin/python3 -m build && \
+  TWINE_USERNAME=__token__ TWINE_PASSWORD="$(cat ~/.pypi)" /usr/bin/python3 -m twine upload dist/*
+
+# npm — needs a human OTP, and the stored token expires (npm whoami returns E401)
+cd sdk/node && npm publish --access public --otp=<code>
+```
+
+`/usr/bin/python3`, not `python3` — the latter has no pip modules on this box.
+
+Registries are immutable: if the repo version already matches what is published,
+BUMP rather than trying to republish. `make sdkversion` fails on exactly that.
+
 ## Liveness is not readiness
 
 `/health` answers "up" as soon as the accept loop runs. It stays green while the
