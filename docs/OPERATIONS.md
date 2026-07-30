@@ -1252,3 +1252,37 @@ Attempt 4 failed because `/counter` genuinely answers: most routes match with
 
 An agent that typos a route gets a plausible answer and never learns. That is
 worth fixing, and it is the next milestone rather than a footnote here.
+
+## M48: a mistyped route should fail
+
+`req.path` carries the query string, so the obvious way to match a route was
+`has_prefix(req.path, "/count")` — and that is what most routes did. It also
+matched `/counter` and `/countXYZ`, which returned a perfectly plausible count.
+
+For an agent-first API that is worse than an error: it teaches a wrong URL by
+rewarding it. An agent that mistypes gets a real answer, writes the wrong URL
+into whatever it is building, and never learns.
+
+The inconsistency is what let it hide. `/health` and a handful of others already
+matched exactly (`path == "/health" || has_prefix(path, "/health?")`), so
+`/healthzzz` correctly 404'd while `/countXYZ` did not — the codebase looked like
+it had a policy.
+
+One helper now expresses that policy once, and all 24 route matches go through
+it. `srv_route` returns a BOOL rather than 0/1, because every call site uses it
+directly as a condition the way `has_prefix` did — the first version returned an
+int and the type checker rejected it at the call sites, which is the compiler
+being more useful than a comment.
+
+Verified: `/count`, `/count?coll=c`, `/ready` and `/verify?coll=c` all work;
+`/counter`, `/countXYZ`, `/findx`, `/readyx`, `/usagex` and six more all 404.
+`make routes` probes eleven mistyped routes plus four real ones, and reverting a
+single route to the loose match makes it report `GHOST /counter answered instead
+of 404`.
+
+### How it was found
+
+Not by inspection. A negative control in the M47 journey harness renamed a
+documented route to `/counter` to prove the harness could detect a contract
+advertising something that does not exist — and the harness passed, because
+`/counter` genuinely answered. The control refusing to fail was the bug report.

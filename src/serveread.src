@@ -11,7 +11,7 @@
 func srv_tail_routes(req) (res, handled) {
     res = srv_err("404 Not Found", "not-found", "unreachable")
     handled = 1
-    if req.method == "GET" && has_prefix(req.path, "/export") {
+    if req.method == "GET" && srv_route(req.path, "/export") {
         if query(req, "format") == "lines" {
             gr_sweep_expired()
             lines := []string{}
@@ -53,7 +53,7 @@ func srv_tail_routes(req) (res, handled) {
         res = srv_ok(body)
         return
     }
-    if req.method == "GET" && has_prefix(req.path, "/count") {
+    if req.method == "GET" && srv_route(req.path, "/count") {
         wh := query(req, "where")
         q_warm(wh)
         body := ""
@@ -65,7 +65,7 @@ func srv_tail_routes(req) (res, handled) {
         res = srv_ok(body)
         return
     }
-    if req.method == "GET" && has_prefix(req.path, "/agg") {
+    if req.method == "GET" && srv_route(req.path, "/agg") {
         f := query(req, "group-by")
         if len(f) == 0 {
             res = srv_err("400 Bad Request", "input", "missing group-by query param")
@@ -79,7 +79,7 @@ func srv_tail_routes(req) (res, handled) {
         res = srv_ok(body)
         return
     }
-    if req.method == "POST" && (req.path == "/index" || has_prefix(req.path, "/index?")) {
+    if req.method == "POST" && (srv_route(req.path, "/index")) {
         f := srv_body_str(req, "field")
         if len(f) == 0 {
             res = srv_err("400 Bad Request", "input", "body must be {\"field\":\"...\",\"sums\":\"a,b\"}")
@@ -92,7 +92,7 @@ func srv_tail_routes(req) (res, handled) {
         res = srv_ok("{\"field\":\"" + jesc(f) + "\",\"docs_indexed\":" + str(gr_count()) + "}")
         return
     }
-    if req.method == "POST" && (req.path == "/cold" || has_prefix(req.path, "/cold?")) {
+    if req.method == "POST" && (srv_route(req.path, "/cold")) {
         cok, cerr := gr_cold_enable()
         if cok == 0 {
             res = srv_err("400 Bad Request", "input", "cold enable failed: " + cerr)
@@ -101,7 +101,7 @@ func srv_tail_routes(req) (res, handled) {
         res = srv_ok("{\"cold\":true,\"docs\":" + str(gr_count()) + "}")
         return
     }
-    if req.method == "POST" && (req.path == "/compact" || has_prefix(req.path, "/compact?")) {
+    if req.method == "POST" && (srv_route(req.path, "/compact")) {
         if gr_compact() == 0 {
             res = srv_err("500 Internal Server Error", "internal", "compaction failed; old files were NOT deleted")
             return
@@ -112,7 +112,7 @@ func srv_tail_routes(req) (res, handled) {
     // /ready is the deep check; /health stays trivial so a monitor can poll it
     // often. A failing readiness probe answers 503, because a probe that returns
     // 200 while reporting failures is decoration.
-    if req.method == "GET" && has_prefix(req.path, "/ready") {
+    if req.method == "GET" && srv_route(req.path, "/ready") {
         rdata, rok := gr_ready(g_srv_db)
         if rok == 0 {
             res = srv_json("503 Service Unavailable", "{\"ok\":false,\"error\":{\"type\":\"not-ready\",\"message\":\"readiness checks failing\"},\"data\":" + rdata + "}")
@@ -121,7 +121,7 @@ func srv_tail_routes(req) (res, handled) {
         res = srv_ok(rdata)
         return
     }
-    if req.method == "GET" && has_prefix(req.path, "/verify") {
+    if req.method == "GET" && srv_route(req.path, "/verify") {
         vdata, vissues := gr_verify(1)
         if vissues > 0 {
             res = srv_json("500 Internal Server Error", "{\"ok\":false,\"error\":{\"type\":\"corruption\",\"message\":\"" + str(vissues) + " integrity issue(s)\"},\"data\":" + vdata + "}")
@@ -130,7 +130,7 @@ func srv_tail_routes(req) (res, handled) {
         res = srv_ok(vdata)
         return
     }
-    if req.method == "GET" && has_prefix(req.path, "/stats") {
+    if req.method == "GET" && srv_route(req.path, "/stats") {
         if g_cold == 1 {
             res = srv_ok("{\"coll\":\"" + jesc(g_coll) + "\",\"cold\":true,\"docs_estimate\":" + str(cold_count_est()) + ",\"runs\":" + str(len(g_run_rid)) + ",\"gen\":" + str(g_gen) + ",\"cold_indexes\":" + str(len(g_cifields)) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}")
             return

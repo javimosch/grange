@@ -57,6 +57,22 @@ func srv_role(req) (role, tid) {
 }
 
 // srv_body_field pulls a raw JSON token out of the request body ("" if absent).
+// srv_route matches a route exactly, or with a query string. `req.path` carries
+// the query string, which is why the naive form was has_prefix(path, "/count") —
+// and that also matched /counter and /countXYZ, so a mistyped route returned a
+// plausible answer and the caller never learned. For an agent-first API that is
+// worse than an error: it teaches a wrong URL by rewarding it.
+//
+// /health and a few others already did this correctly; the rest did not, which
+// is how the inconsistency hid.
+func srv_route(p, r) (yes) {
+    // returns a BOOL: every call site uses it directly as a condition
+    // (`if req.method == "GET" && srv_route(...)`), the way has_prefix did
+    yes = false
+    if p == r { yes = true  return }
+    if has_prefix(p, r + "?") { yes = true }
+}
+
 func srv_body_field(req, f) (tok) {
     tok = ""
     v, err := json_get(req.body, "." + f)
@@ -91,16 +107,16 @@ func srv_handle(req) (res) {
         res = ok_text(llms_txt())
         return
     }
-    if req.method == "GET" && has_prefix(req.path, "/guide") {
+    if req.method == "GET" && srv_route(req.path, "/guide") {
         res = ok_text(llms_txt())
         return
     }
-    if req.path == "/health" || has_prefix(req.path, "/health?") {
+    if srv_route(req.path, "/health") {
         res = srv_ok("{\"status\":\"up\"}")
         return
     }
     // self-serve tenant signup: a peage wallet is the only credential
-    if req.method == "POST" && (req.path == "/tenants" || has_prefix(req.path, "/tenants?")) {
+    if req.method == "POST" && (srv_route(req.path, "/tenants")) {
         w := header(req, "x-peage-wallet")
         if has_prefix(w, "pw_") == false {
             res = srv_err("400 Bad Request", "input", "send X-Peage-Wallet: pw_... (mint one: POST " + tn_peage_url() + "/v1/wallets — see /llms.txt of peage)")
@@ -148,7 +164,7 @@ func srv_handle(req) (res) {
         res = srv_err("403 Forbidden", "read-only", "this is a follower; write to the primary")
         return
     }
-    if req.method == "POST" && (req.path == "/shutdown" || has_prefix(req.path, "/shutdown?")) && role != "admin" {
+    if req.method == "POST" && (srv_route(req.path, "/shutdown")) && role != "admin" {
         res = srv_err("403 Forbidden", "auth", "admin only")
         return
     }
@@ -157,7 +173,7 @@ func srv_handle(req) (res) {
         return
     }
     if g_srv_follow == 1 { gr_refresh() }
-    if req.method == "POST" && (req.path == "/put" || has_prefix(req.path, "/put?")) {
+    if req.method == "POST" && (srv_route(req.path, "/put")) {
         doc := srv_body_field(req, "doc")
         if valid_doc(doc) == 0 {
             res = srv_err("400 Bad Request", "input", "body must be {\"doc\":{...}} with minified JSON")
@@ -189,7 +205,7 @@ func srv_handle(req) (res) {
         res = srv_ok("{\"id\":\"" + jesc(id) + "\"}")
         return
     }
-    if req.method == "GET" && has_prefix(req.path, "/get") {
+    if req.method == "GET" && srv_route(req.path, "/get") {
         id := query(req, "id")
         gr_sweep_expired()
         gdoc := ""
@@ -206,7 +222,7 @@ func srv_handle(req) (res) {
         res = srv_ok("{\"id\":\"" + jesc(id) + "\",\"doc\":" + gdoc + "}")
         return
     }
-    if req.method == "POST" && (req.path == "/del" || has_prefix(req.path, "/del?")) {
+    if req.method == "POST" && (srv_route(req.path, "/del")) {
         id := srv_body_str(req, "id")
         if gr_del(id) == 0 {
             res = srv_err("404 Not Found", "not-found", "no document with id " + id)
@@ -219,7 +235,7 @@ func srv_handle(req) (res) {
         res = srv_ok("{\"id\":\"" + jesc(id) + "\",\"deleted\":true}")
         return
     }
-    if req.method == "GET" && has_prefix(req.path, "/find") {
+    if req.method == "GET" && srv_route(req.path, "/find") {
         limit := parse_int(query(req, "limit"))
         if limit == 0 { limit = 100 }
         wh := query(req, "where")
@@ -268,7 +284,7 @@ func srv_handle(req) (res) {
         res = bres
         return
     }
-    if req.method == "GET" && has_prefix(req.path, "/watch") {
+    if req.method == "GET" && srv_route(req.path, "/watch") {
         since := parse_int(query(req, "since"))
         tmo := parse_int(query(req, "timeout"))
         if tmo < 1 { tmo = 25 }
@@ -301,7 +317,7 @@ func srv_handle(req) (res) {
         res = rres
         return
     }
-    if req.method == "POST" && (req.path == "/shutdown" || has_prefix(req.path, "/shutdown?")) {
+    if req.method == "POST" && (srv_route(req.path, "/shutdown")) {
         uok2, uerr2 := gr_use(g_srv_db, "_sys")
         if uok2 == 1 { tn_rl_flush()  gr_commit() }
         gr_commit()

@@ -15,7 +15,7 @@ func srv_bulk_route(req) (res, handled) {
     //   {...}            put, auto id
     //   <id>\t{...}      put with id
     //   -\t<id>          delete
-    if req.method == "POST" && (req.path == "/bulk" || has_prefix(req.path, "/bulk?")) {
+    if req.method == "POST" && (srv_route(req.path, "/bulk")) {
         // Counting is index arithmetic over the body (no line is materialised).
         nlines := gr_count_lines(bytes(req.body))
         if nlines > 50000 {

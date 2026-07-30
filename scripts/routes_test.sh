@@ -54,6 +54,25 @@ probe POST /cold  '{"coll":"c2"}'
 probe POST /compact '{"coll":"c"}'
 probe POST /tenants '{"name":"t"}'
 
+# A MISTYPED route must 404, not answer. Most routes were matched with
+# has_prefix(req.path, "/count") — req.path carries the query string, so that was
+# the obvious way to write it — and it also matched /counter and /countXYZ, which
+# returned a perfectly plausible count. For an agent-first API that is worse than
+# an error: it teaches a wrong URL by rewarding it. Found by a negative control in
+# the journey harness that refused to fail.
+ghosts=0
+for gp in counter countXYZ findx getx aggx statsx readyx verifyx usagex exportx collectionsx; do
+  body=$(curl -s -m 10 "http://localhost:$PORT/$gp?coll=c" -H "authorization: Bearer $TOK" 2>/dev/null)
+  echo "$body" | grep -q "no such route" || { echo "GHOST /$gp answered instead of 404: $(echo "$body" | head -c 55)"; ghosts=$((ghosts + 1)); }
+done
+if [ "$ghosts" = "0" ]; then echo "ok mistyped routes 404 instead of answering (11 probed)"
+else echo "FAIL $ghosts mistyped route(s) answered"; fails=$((fails + ghosts)); fi
+# ...and the real routes still work, with and without a query string
+for rp in "/count" "/count?coll=c" "/ready" "/verify?coll=c"; do
+  body=$(curl -s -m 10 "http://localhost:$PORT$rp" -H "authorization: Bearer $TOK" 2>/dev/null)
+  echo "$body" | grep -q "no such route" && { echo "FAIL real route $rp stopped working"; fails=$((fails + 1)); }
+done
+
 kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
 rm -rf "$DB"
 

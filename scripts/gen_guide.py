@@ -20,7 +20,7 @@ import re
 import sys
 from pathlib import Path
 
-VERSION = "0.12.0"
+VERSION = "0.12.1"
 
 GUIDE = {
     "tool": "grange",
@@ -72,6 +72,7 @@ GUIDE = {
         "read": "GET /get /find /count /agg /export /stats /verify /collections /dbs /usage /watch /health /ready /guide",
         "write": "POST /put /del /bulk /index /cold /compact /tenants /shutdown",
         "auth": "Authorization: Bearer <token>. No anonymous access and no token query parameter.",
+        "routes_are_exact": "a route matches its exact path or that path followed by ?query — nothing else. /counter and /countXYZ are 404, not a count. Until v0.12.1 most routes matched by prefix and a mistyped URL returned a plausible answer, which teaches a wrong URL by rewarding it.",
         "find_params": "coll, where, limit, order, desc=1, after=<cursor>, fields=a,b",
         "watch": "GET /watch?coll=&since=&timeout= long-polls for changes; resync=1 means you are too far behind to patch",
         "bulk": "POST /bulk?coll=C with one 'id<TAB>{json}' per line ('-<TAB>id' deletes); capped at 50000 ops, all-or-nothing",
