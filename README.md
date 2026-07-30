@@ -276,6 +276,31 @@ end of [docs/OPERATIONS.md](docs/OPERATIONS.md) — the short version is that it
 suitable for a service whose failure you can tolerate, and that its one
 irreducible gap is that nobody but its author has run it.
 
+## Telemetry
+
+grange sends one anonymous usage event per invocation: version, os/arch, which
+verb ran, and whether it failed. **No identity, no install id, no arguments, no
+paths, no document data.** `grange telemetry` prints the exact payload it would
+send, built by the same code that sends it.
+
+```sh
+GRANGE_TELEMETRY=0 grange count ...    # off, per invocation
+DO_NOT_TRACK=1 grange count ...        # honoured
+grange telemetry --telemetry-off       # off, persistently
+GRANGE_TELEMETRY_URL=https://you/t     # or point it at your own collector
+```
+
+CI is detected and defaults to off. It never blocks (a hung collector costs 2
+seconds, once), never retries, never changes an exit code, and never writes to
+stdout.
+
+Why it exists, stated plainly: for 51 milestones there was no way to tell
+"nobody uses this" from "the documented install command has been broken since
+the first release". It was the second. Downloads and clones report the same zero
+for both. The full contract is
+[cli-telemetry-spec](https://github.com/javimosch/cli-telemetry-spec), of which
+grange is the reference implementation.
+
 ## Scope & honesty (M5)
 
 - A long-lived server's RSS grows with the work it has done (see

@@ -111,6 +111,19 @@ func srv_handle(req) (res) {
         res = ok_text(llms_txt())
         return
     }
+    // the telemetry collector (cli-telemetry-spec §3.4/§3.5). Public and
+    // unauthenticated by necessity — a CLI in the wild carries no credential —
+    // and therefore forgeable, which is why it stores a usage signal and must
+    // never be treated as an audit log. Nothing about the CONNECTION is read.
+    if req.method == "POST" && srv_route(req.path, "/t") {
+        tok, twhy := tc_accept(g_srv_db, req)
+        if tok == 0 {
+            res = srv_err("400 Bad Request", "input", twhy)
+            return
+        }
+        res = srv_ok("{\"recorded\":true}")
+        return
+    }
     if srv_route(req.path, "/health") {
         res = srv_ok("{\"status\":\"up\"}")
         return

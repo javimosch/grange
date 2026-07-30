@@ -1,0 +1,234 @@
+// grange telemetry — the reference implementation of cli-telemetry-spec.
+//
+// Why this exists: after 51 milestones grange had no way to distinguish "nobody
+// uses this" from "the install command has been broken since the first release".
+// Both report zero downloads. M51 found it was the second — the README pointed
+// at an asset name that had never been published, and the binary behind it was
+// dynamically linked under a paragraph promising the opposite. Nobody could have
+// reported that, because the failure happens before the tool runs.
+//
+// What it sends: tool, version, event, verb, os, arch, exit class. That is the
+// whole list, written out literally below rather than serialised from a struct,
+// so a field cannot join it by accident later.
+//
+// What it never sends: hostname, username, paths, arguments, flag values,
+// document contents, database names, collection names, tokens, URLs, error text,
+// environment, or any id derived from the machine. grange holds other people's
+// data; the moment telemetry can see any of it, the feature is indefensible.
+//
+// Off switches are evaluated in tel_enabled(), which every send path calls
+// first: GRANGE_TELEMETRY=0, DO_NOT_TRACK=1, a config flag, and CI detection.
+//
+// Full contract: https://github.com/javimosch/cli-telemetry-spec
+
+func tel_endpoint() (u) {
+    u = env("GRANGE_TELEMETRY_URL")
+    // Overridable on purpose: an organisation that wants the signal to stay
+    // in-house should be able to point it at their own collector rather than
+    // having to choose between "on" and "off".
+    if len(u) == 0 { u = "https://grange.intrane.fr/t" }
+}
+
+// tel_mkdir_p: machin's mkdir is ONE level. $HOME/.config does not exist on a
+// fresh machine, so every write below it failed silently — the opt-out flag was
+// never persisted (the tool reported "disabled" and would have kept sending),
+// the install id was regenerated on every run (every invocation would have
+// looked like a new install, inflating the exact number this exists to read),
+// and the first-run notice would have printed forever. Found by running it with
+// a throwaway HOME, which is the only way to see a fresh machine.
+func tel_mkdir_p(d) (ok) {
+    ok = 0
+    if len(d) == 0 { return }
+    parts := split(d, "/")
+    cur := ""
+    i := 0
+    while i < len(parts) {
+        if len(parts[i]) > 0 {
+            cur = cur + "/" + parts[i]
+            mkdir(cur)          // -1 when it already exists, which is fine
+        }
+        i = i + 1
+    }
+    probe := d + "/.w"
+    if write_file(probe, "1") < 0 { return }
+    remove(probe)
+    ok = 1
+}
+
+func tel_cfg_dir() (d) {
+    d = env("XDG_CONFIG_HOME")
+    if len(d) == 0 {
+        h := env("HOME")
+        if len(h) == 0 { d = ""  return }
+        d = h + "/.config"
+    }
+    d = d + "/grange"
+}
+
+// tel_truthy: an env var counts as SET only when it is not an explicit off.
+// DO_NOT_TRACK=0 means "do track", which is the whole point of the convention
+// having a value at all.
+func tel_truthy(v) (yes) {
+    yes = 0
+    if len(v) == 0 { return }
+    if v == "0" || v == "false" || v == "off" || v == "no" { return }
+    yes = 1
+}
+
+// tel_why: the reason telemetry is off, named. "Off, and I will not say why" is
+// not inspectable, and inspectability is what makes opt-out defensible.
+func tel_why() (reason) {
+    reason = "enabled"
+    if tel_truthy(env("DO_NOT_TRACK")) == 1 { reason = "DO_NOT_TRACK is set"  return }
+    t := env("GRANGE_TELEMETRY")
+    if len(t) > 0 && tel_truthy(t) == 0 { reason = "GRANGE_TELEMETRY is off"  return }
+    // CI runs are not users. Counting them inflates every number this exists to
+    // read: a project whose own gate runs 21 harnesses would out-report its
+    // entire userbase from one `make verify`.
+    if len(env("CI")) > 0 { reason = "CI detected"  return }
+    if len(env("GITHUB_ACTIONS")) > 0 { reason = "CI detected (GitHub Actions)"  return }
+    if len(env("GITLAB_CI")) > 0 { reason = "CI detected (GitLab CI)"  return }
+    if len(env("BUILDKITE")) > 0 { reason = "CI detected (Buildkite)"  return }
+    d := tel_cfg_dir()
+    if len(d) == 0 { reason = "no config directory (HOME unset)"  return }
+    if len(read_file(d + "/telemetry-off")) > 0 { reason = "disabled by `grange telemetry --off`"  return }
+}
+
+func tel_enabled() (yes) {
+    yes = 0
+    if tel_why() == "enabled" { yes = 1 }
+}
+
+// tel_payload builds the EXACT bytes that get posted. Note what is NOT here: an
+// install id. The spec permits a random one and calls omitting it the safer
+// default, and grange does not need it — the `install` event fires once per
+// machine, so COUNTING install events already answers "how many machines ran
+// this" without anything per-install existing at all. A field that earns nothing
+// is a field that can only leak.
+//
+// tel_payload builds the EXACT bytes that get posted. `grange telemetry` prints
+// this same function's output, so the command cannot describe something other
+// than what is sent — if it could, opt-out would not be honest.
+func tel_payload(evt, verb, exit_class) (j) {
+    j = "{\"tool\":\"grange\"" +
+        ",\"version\":\"" + grange_version() + "\"" +
+        ",\"event\":\"" + evt + "\"" +
+        ",\"verb\":\"" + verb + "\"" +
+        ",\"os\":\"linux\",\"arch\":\"x86_64\"" +
+        ",\"exit_class\":" + str(exit_class) +
+        ",\"ts\":" + str(now()) + "}"
+}
+
+// tel_notice: disclosure on STDERR, once per machine, before anything is sent.
+// stderr because stdout is the data contract — a four-line notice appearing in
+// someone's `grange count | jq` pipeline would break every consumer at once, and
+// it would break them on the run where they first met the tool.
+func tel_notice_shown() (shown) {
+    shown = 0
+    d := tel_cfg_dir()
+    if len(d) == 0 { shown = 1  return }
+    if len(read_file(d + "/telemetry-notice")) > 0 { shown = 1 }
+}
+
+func tel_notice() {
+    if tel_notice_shown() == 1 { return }
+    d := tel_cfg_dir()
+    if tel_mkdir_p(d) == 0 { return }
+    write_file(d + "/telemetry-notice", "1")
+    write(2, "[telemetry] grange sends anonymous usage counts: version, os/arch, which verb ran,\n")
+    write(2, "[telemetry] and whether it failed. No identity, arguments, paths or document data.\n")
+    write(2, "[telemetry] Exact payload: `grange telemetry`. Disable: GRANGE_TELEMETRY=0\n")
+}
+
+// tel_post_bg does the actual send. machin's https_post has no timeout, so it is
+// run in a goroutine and raced against a sleep: the caller waits at most
+// TEL_TIMEOUT_MS and then continues regardless. A collector that is down, slow,
+// firewalled, or unreachable on an air-gapped host must be indistinguishable
+// from one that answered — that is what "never blocks the user" means in
+// practice, and without this race a hung collector would hang every command.
+func tel_send(evt, verb, exit_class) {
+    if tel_enabled() == 0 { return }
+    tel_notice()
+    url := tel_endpoint()
+    body := tel_payload(evt, verb, exit_class)
+    done := make(chan int)
+    go tel_post_worker(url, body, done)
+    go tel_timeout_worker(done)
+    <-done
+}
+
+func tel_post_worker(url, body, done) {
+    https_post(url, body)
+    done <- 1
+}
+
+func tel_timeout_worker(done) {
+    sleep(2000)
+    done <- 0
+}
+
+// tel_first_run: the `install` event, which is the one that answers the question
+// downloads cannot — did anyone get it RUNNING. It fires once per machine.
+func tel_first_run_pending() (pending) {
+    pending = 0
+    d := tel_cfg_dir()
+    if len(d) == 0 { return }
+    if len(read_file(d + "/installed")) == 0 { pending = 1 }
+}
+
+func tel_mark_installed() {
+    d := tel_cfg_dir()
+    if len(d) == 0 { return }
+    if tel_mkdir_p(d) == 0 { return }
+    write_file(d + "/installed", str(now()))
+}
+
+// tel_report is what the rest of grange calls, AFTER the user's result has been
+// written to stdout. One event per invocation, never on a timer, never per
+// request — a per-request event would be a request log, and this is not one.
+func tel_report(verb, exit_class) {
+    if tel_enabled() == 0 { return }
+    if tel_first_run_pending() == 1 {
+        tel_mark_installed()
+        tel_send("install", verb, exit_class)
+        return
+    }
+    evt := "run"
+    if exit_class != 0 { evt = "error" }
+    tel_send(evt, verb, exit_class)
+}
+
+// cmd_telemetry: the inspection verb. Prints the REAL next payload from the same
+// builder tel_send uses, so a reviewer verifies rather than trusts.
+func cmd_telemetry(fs) {
+    d := tel_cfg_dir()
+    if flag_on(fs, "telemetry-off") {
+        if len(d) == 0 { emit_err(90, "no_config_dir", "HOME is unset, so the opt-out cannot be persisted", 1, "run with GRANGE_TELEMETRY=0 instead")  return }
+        tel_mkdir_p(d)
+        write_file(d + "/telemetry-off", "1")
+        // Read it BACK. Reporting "disabled" without confirming the opt-out
+        // survived this process is how a tool ends up still sending data from
+        // someone who switched it off and was told that it worked.
+        if tel_enabled() == 1 {
+            emit_err(90, "opt_out_not_persisted", "could not persist the opt-out to " + d, 1, "use GRANGE_TELEMETRY=0, which needs no writable directory")
+        }
+        emit_ok("{\"enabled\":false,\"reason\":\"disabled by `grange telemetry --off`\"}")
+        return
+    }
+    if flag_on(fs, "telemetry-on") {
+        if len(d) > 0 { remove(d + "/telemetry-off") }
+        emit_ok("{\"enabled\":true,\"reason\":\"enabled\"}")
+        return
+    }
+    reason := tel_why()
+    en := "false"
+    if reason == "enabled" { en = "true" }
+    emit_ok("{\"enabled\":" + en +
+        ",\"reason\":\"" + jesc(reason) + "\"" +
+        ",\"endpoint\":\"" + jesc(tel_endpoint()) + "\"" +
+        ",\"disable\":\"GRANGE_TELEMETRY=0\"" +
+        ",\"notice_shown\":" + str(tel_notice_shown()) +
+        ",\"install_id\":\"none — grange sends no per-install identifier\"" +
+        ",\"spec\":\"https://github.com/javimosch/cli-telemetry-spec\"" +
+        ",\"next_payload\":" + tel_payload("run", "telemetry", 0) + "}")
+}

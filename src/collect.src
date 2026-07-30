@@ -1,0 +1,126 @@
+// The telemetry collector — the receiving half of cli-telemetry-spec, served by
+// grange and stored in grange.
+//
+// Two rules from the spec shape everything here:
+//
+//   §3.4  the collector MUST NOT log or retain client IP addresses, and MUST NOT
+//         enrich events with geolocation or third-party data
+//   §3.5  the collector SHOULD store AGGREGATES, not a row per event, and MUST
+//         NOT build per-user profiles
+//
+// So nothing arriving here is stored verbatim. The handler reads the five fields
+// it cares about, discards the rest of the request — including everything about
+// the connection — and increments one counter document whose id is composed
+// entirely of low-cardinality values:
+//
+//   20596.grange.0-13-1.install.linux.none
+//
+// There is no id, no address, no timestamp beyond the day, and no field that
+// varies per sender. Two different machines running the same version on the same
+// day are the same document, by construction. That is not a policy I could
+// quietly change later — it is the shape of the key.
+//
+// The route is public and unauthenticated (a CLI in the wild has no credential),
+// which makes the counts forgeable. That is accepted and stated rather than
+// papered over with a shared secret that ships inside the binary: a token every
+// copy of the tool carries is not a token. These numbers are a usage signal, not
+// an audit log, and should never be used as one.
+
+func tc_field(req, name) (v) {
+    v = trim(srv_body_str(req, name))
+}
+
+// tc_clean bounds and sanitises a value before it becomes part of a document id.
+// The allow-list in the spec constrains what a HONEST sender transmits; this
+// constrains what a hostile one can do, which is a different problem. Without it
+// a crafted `verb` could carry a separator, an unbounded string, or a newline
+// into the key space.
+func tc_clean(v, max) (out) {
+    out = ""
+    i := 0
+    while i < len(v) && i < max {
+        c := substr(v, i, i + 1)
+        keep := false
+        if c >= "a" && c <= "z" { keep = true }
+        if c >= "A" && c <= "Z" { keep = true }
+        if c >= "0" && c <= "9" { keep = true }
+        // "." is deliberately NOT allowed: it is the key separator below, so a
+        // crafted verb containing one could inject extra segments into the key
+        // space. The separator's alphabet and the values' alphabet must not
+        // overlap, or the key is parseable into something other than what was
+        // sent.
+        if c == "-" || c == "_" { keep = true }
+        if keep { out = out + c }
+        i = i + 1
+    }
+}
+
+// tc_day: the finest time resolution stored. Anything finer starts to describe
+// when a particular person works.
+func tc_day(ts) (d) {
+    days := ts / 86400
+    d = str(days)
+}
+
+func tc_accept(root, req) (ok, why) {
+    ok = 0
+    why = ""
+    // Events land in their OWN collection, always, regardless of what the
+    // request looked like. A collector that wrote into whatever collection the
+    // caller named would let an unauthenticated public route append to any
+    // tenant's data.
+    oko, oerr := gr_open(root, "_telemetry")
+    if oko == 0 { why = "collector unavailable: " + oerr  return }
+    tool := tc_clean(tc_field(req, "tool"), 32)
+    // dots become dashes BEFORE sanitising, not after: tc_clean strips "." (it is
+    // the key separator), so cleaning first turned 0.13.1 into "0131" — which
+    // 0.1.31 also produces. Two different versions sharing a counter is the kind
+    // of quiet wrongness that makes a metric worse than no metric.
+    ver := tc_clean(replace(tc_field(req, "version"), ".", "-"), 24)
+    evt := tc_clean(tc_field(req, "event"), 16)
+    verb := tc_clean(tc_field(req, "verb"), 24)
+    osn := tc_clean(tc_field(req, "os"), 12)
+    if len(tool) == 0 { why = "missing tool"  return }
+    if len(evt) == 0 { why = "missing event"  return }
+    // the event vocabulary is closed: three, per spec §4.1
+    if evt != "install" && evt != "run" && evt != "error" { why = "unknown event"  return }
+    if len(ver) == 0 { ver = "unknown" }
+    if len(osn) == 0 { osn = "unknown" }
+    if len(verb) == 0 { verb = "none" }
+
+    // "." rather than "|": a pipe is grange's own keyset-cursor separator and is
+    // rejected by valid_id, so building keys with it would have made every write
+    // fail silently — the collector would have returned {"recorded":true} and
+    // stored nothing.
+    key := tc_day(now()) + "." + tool + "." + replace(ver, ".", "-") + "." + evt + "." + osn + "." + verb
+    prev, found := gr_get(key)
+    n := 1
+    if found == 1 {
+        // The counter is read back by slicing, not by a JSON path: the collector
+        // writes this document itself and always emits {"n":<int>, first, so the
+        // shape is known. json_get was tried first and returned nothing for the
+        // top-level field, which left every counter stuck at 1 while the handler
+        // cheerfully reported success — three identical events produced three
+        // documents that each said n=1.
+        head := substr(prev, 0, 20)
+        c := ""
+        i := 5                       // past {"n":
+        while i < len(head) {
+            ch := substr(head, i, i + 1)
+            if ch < "0" || ch > "9" { break }
+            c = c + ch
+            i = i + 1
+        }
+        if len(c) > 0 { n = parse_int(c) + 1 }
+    }
+    gr_put(key, "{\"n\":" + str(n) + ",\"tool\":\"" + tool + "\",\"version\":\"" + ver +
+        "\",\"event\":\"" + evt + "\",\"os\":\"" + osn + "\",\"verb\":\"" + verb +
+        "\",\"day\":" + tc_day(now()) + "}")
+    // Commit before returning. Without this the counter lived in the memtable
+    // until something else happened to flush it, and the next request — which
+    // opens a different collection — dropped it: three events in a row produced
+    // one stored document, the last one. The handler answered {"recorded":true}
+    // every time.
+    gr_commit()
+    ok = 1
+}

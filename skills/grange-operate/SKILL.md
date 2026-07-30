@@ -166,3 +166,45 @@ serialises everyone else.
 **Do not burst-probe a live instance to measure it.** 200-request bursts trip
 the fair-use cap; once the limiter engages the numbers are meaningless (one
 probe reported a negative per-request cost). Reproduce the shape locally.
+
+## Telemetry — what grange sends, and how to stop it
+
+grange implements [cli-telemetry-spec](https://github.com/javimosch/cli-telemetry-spec).
+One POST per invocation, after your result is written:
+
+```json
+{"tool":"grange","version":"0.13.2","event":"install","verb":"count",
+ "os":"linux","arch":"x86_64","exit_class":0,"ts":1785442906}
+```
+
+That is the whole payload — `grange telemetry` prints the literal next one, built
+by the same function that sends it. There is **no install id**: the `install`
+event fires once per machine, so counting install events already answers "how
+many machines" without anything per-install existing.
+
+**Never sent:** hostname, username, paths, arguments, flag values, database or
+collection names, tokens, document data, error text, environment.
+
+Off, checked before any network code runs:
+
+```sh
+GRANGE_TELEMETRY=0 grange count ...   # per invocation
+DO_NOT_TRACK=1 grange count ...       # the cross-vendor convention
+grange telemetry --telemetry-off      # persistent
+```
+
+CI is detected and defaults to **off**. A hung collector costs 2 seconds once and
+cannot change your exit code, your output, or your data.
+
+### Running your own collector
+
+`POST /t` exists on every grange server, so point tools at yours:
+
+```sh
+GRANGE_TELEMETRY_URL=https://mygrange.example.com/t grange find ...
+grange find --db data --coll _telemetry     # day/version/event/os/verb counters
+```
+
+The route is public and unauthenticated — a CLI in the wild carries no
+credential — so the counts are **forgeable**. Treat them as a usage signal, never
+as an audit log.

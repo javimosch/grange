@@ -20,7 +20,7 @@ import re
 import sys
 from pathlib import Path
 
-VERSION = "0.13.1"
+VERSION = "0.13.2"
 
 GUIDE = {
     "tool": "grange",
@@ -48,6 +48,7 @@ GUIDE = {
         "serve --db d --port 8801 --token T   (HTTP; add --follow for a read-only replica)",
     ],
     "verbs": {
+        "telemetry": "print the exact usage-event payload that would be sent, the current state and why; --telemetry-off / --telemetry-on. grange sends anonymous counts (version, os/arch, verb, exit class) and NO identity, arguments, paths or document data — disable with GRANGE_TELEMETRY=0 or DO_NOT_TRACK=1, and it is off by default in CI",
         "put": "--db --coll --id --doc [--ttl] -> {id}",
         "get": "--db --coll --id -> {id,doc}",
         "del": "--db --coll --id -> {id,deleted}",
@@ -133,6 +134,8 @@ GUIDE = {
         "`follow` across machines is async)."
     ),
     "env": {
+        "GRANGE_TELEMETRY": "0/false/off disables usage telemetry entirely (nothing is sent). DO_NOT_TRACK=1 is honoured too, and CI is detected and defaults to off",
+        "GRANGE_TELEMETRY_URL": "point telemetry at your own collector instead of grange.intrane.fr/t — an organisation that wants the signal in-house should not have to choose between on and off",
         "GRANGE_TOKEN": "serve: bearer token (else --token, else generated)",
         "GRANGE_DB": "serve: database directory when --db is absent",
         "GRANGE_FSYNC": "0 disables fsync on commit (faster, not crash-safe against power loss)",
@@ -156,6 +159,14 @@ GUIDE = {
         "GRANGE_IDX_PARTS": "partitions per cold equality index",
         "GRANGE_IDX_BATCH": "records per batch when building a cold index",
         "GRANGE_RANGE_PAGE": "entries per sorted range-index page",
+    },
+    "telemetry": {
+        "what": "one POST per invocation: tool, version, event (install|run|error), verb name, os, arch, exit class, timestamp. No install id, no identity, no arguments, no paths, no document data — see `grange telemetry` for the literal payload",
+        "why": "downloads and clones cannot distinguish 'nobody uses this' from 'the install command has been broken since the first release'. In M51 it was the second, for every release, and nobody could report it because the failure happens before the tool runs",
+        "off": "GRANGE_TELEMETRY=0, DO_NOT_TRACK=1, `grange telemetry --telemetry-off`, or CI (default off). Checked before any network code runs",
+        "never": "does not block (a hung collector costs 2s, once), does not retry, does not change the exit code, and never writes to stdout",
+        "collector": "POST /t on any grange server, public and unauthenticated — therefore forgeable, and a usage signal rather than an audit log. Events are stored as day/version/event/os/verb COUNTERS in the _telemetry collection; nothing per-sender and no IP is retained",
+        "spec": "https://github.com/javimosch/cli-telemetry-spec"
     },
     "readiness": (
         "/health is liveness and stays trivial so a monitor can poll it often — it answers \"up\" as soon "
@@ -212,6 +223,7 @@ HELP = {
         {"name": "agg", "flags": ["--db", "--coll", "--group-by", "--sum", "--minmax"], "out": "{group_by,mode,groups}"},
         {"name": "index", "flags": ["--db", "--coll", "--field", "--sums", "--range"], "out": "{field,docs_indexed}"},
         {"name": "indexes", "flags": ["--db", "--coll"], "out": "{indexes}"},
+        {"name": "telemetry", "flags": ["--telemetry-off", "--telemetry-on"], "out": "{enabled,reason,endpoint,disable,next_payload}"},
         {"name": "export", "flags": ["--db", "--coll", "--where", "--fields"], "out": "{count,items}"},
         {"name": "compact", "flags": ["--db", "--coll"], "out": "{gen,docs}"},
         {"name": "verify", "flags": ["--db", "--coll"], "out": "{intact,issues}; exit 92 if not intact"},
