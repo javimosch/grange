@@ -56,24 +56,34 @@ func cold_idx_candidates(field, token) (ids) {
     }
 }
 
-// cold_idx_usable finds the first equality clause on a ready cold index.
-// Returns (field, token, ok) — token is the raw JSON form actually stored.
-func cold_idx_usable(fields, ops, vals) (field, token, ok) {
-    field = ""
-    token = ""
-    ok = 0
-    if g_cold == 0 { return }
-    i := 0
-    while i < len(fields) {
-        if ops[i] == "=" && cold_idx_ready(fields[i]) == 1 {
-            field = fields[i]
-            // stored tokens are raw JSON: a string value carries its quotes
-            token = "\"" + vals[i] + "\""
-            if len(cold_idx_candidates(field, token)) == 0 { token = vals[i] }
-            ok = 1
-            return
+// cold_eq_candidates resolves ONE equality clause value into a candidate set —
+// either a single value, or a `|`-separated list of alternatives (an IN clause),
+// in which case the sets are unioned. Each alternative is still an exact index
+// lookup, which is why alternatives were chosen over arbitrary boolean OR: no
+// shape of this clause degrades into a scan.
+//
+// Stored tokens are raw JSON, so a string value carries its quotes and a number
+// does not; each alternative is probed quoted first, then bare.
+func cold_eq_candidates(field, val) (ids) {
+    ids = []string{}
+    alts := []string{val}
+    if contains(val, "|") { alts = split(val, "|") }
+    seen := make(map[string]int)
+    a := 0
+    while a < len(alts) {
+        if len(alts[a]) > 0 {
+            got := cold_idx_candidates(field, "\"" + alts[a] + "\"")
+            if len(got) == 0 { got = cold_idx_candidates(field, alts[a]) }
+            k := 0
+            while k < len(got) {
+                if has(seen, got[k]) == false {
+                    seen[got[k]] = 1
+                    ids = append(ids, got[k])
+                }
+                k = k + 1
+            }
         }
-        i = i + 1
+        a = a + 1
     }
 }
 
@@ -193,28 +203,6 @@ func cold_stable() (yes) {
     yes = 1
 }
 
-// cold_idx_count_only counts entries for `token` in the one run's index page.
-func cold_idx_count_only(field, token) (n) {
-    n = 0
-    pcount := g_run_iparts[0]
-    if pcount < 1 { pcount = cold_idx_parts() }
-    j := cold_hash(token) & (pcount - 1)
-    body, ok := gr_load_recbody(gr_dir() + "/" + cold_idx_name(g_run_rid[0], field, j))
-    if ok == 0 { n = 0 - 1  return }
-    pos := 0
-    while true {
-        ln, next, more := gr_next_line(body, pos)
-        if more == 0 { return }
-        pos = next
-        if has_prefix(ln, "p|") {
-            idl, inext, imore := gr_next_line(body, pos)
-            if imore == 0 { return }
-            pos = inext
-            if substr(ln, 2, len(ln)) == token { n = n + 1 }
-        }
-    }
-}
-
 // cold_intersect keeps only ids present in both sets (the smaller one drives).
 func cold_intersect(a, b) (out) {
     out = []string{}
@@ -248,11 +236,9 @@ func cold_all_candidates(fields, ops, vals) (ids, used, covered) {
         cands := []string{}
         if ops[i] == "=" {
             if cold_idx_ready(fields[i]) == 1 && cold_is_range(fields[i]) == 0 {
-                tok := "\"" + vals[i] + "\""
-                if len(cold_idx_candidates(fields[i], tok)) == 0 { tok = vals[i] }
-                cands = cold_idx_candidates(fields[i], tok)
+                cands = cold_eq_candidates(fields[i], vals[i])
                 got = 1
-            } else if cold_is_range(fields[i]) == 1 && cold_idx_ready(fields[i]) == 1 {
+            } else if cold_is_range(fields[i]) == 1 && cold_idx_ready(fields[i]) == 1 && contains(vals[i], "|") == false {
                 rc, pr := cold_rng_candidates(fields[i], "=", vals[i])
                 cands = rc
                 got = 1

@@ -20,7 +20,7 @@ import re
 import sys
 from pathlib import Path
 
-VERSION = "0.12.1"
+VERSION = "0.12.2"
 
 GUIDE = {
     "tool": "grange",
@@ -80,8 +80,13 @@ GUIDE = {
     "query": {
         "where": (
             "comma-separated clauses, ANDed: field=value, field~=substring, and numeric > < >= <= . "
-            "Dotted paths reach nested fields (user.id=7). Values containing , or = are not "
+            "Dotted paths reach nested fields (user.id=7). Values containing , = or | are not "
             "expressible — get by id."
+        ),
+        "in_clause": (
+            "field=a|b|c matches ANY of the alternatives — an IN clause, the OR that is expressible. "
+            "On an equality-indexed field it is served as a UNION of index buckets, not a scan. "
+            "Arbitrary boolean OR across DIFFERENT fields is not supported: the comma is always AND."
         ),
         "windows": "two clauses on one --range field (ts>=A,ts<B) fold into a single span: two binary searches, not a scan",
         "ordering": (
@@ -104,7 +109,7 @@ GUIDE = {
             "asking for 3 was 65% less payload — which for a caller paying per token is the point."
         ),
         "cost": "every response reports the plan (mode) and what it cost (scanned documents, pages read), so a caller can tell an index lookup from a scan",
-        "still_scans": "a range clause on a field with no --range index; any ~= substring clause; multi-clause queries whose fields are unindexed",
+        "still_scans": "a range clause on a field with no --range index; any ~= substring clause; a|b alternatives on a --range field (equality indexes union instead); multi-clause queries whose fields are unindexed",
     },
     "storage": {
         "hot": "memtable holds the whole collection; segments make open fast, not memory small",

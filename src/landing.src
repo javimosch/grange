@@ -24,7 +24,7 @@ func llms_txt() (t) {
         "PUT     curl -s -X POST $G/put -H \"$A\" -d '{\"coll\":\"leads\",\"id\":\"l1\",\"doc\":{\"co\":\"acme\",\"score\":9}}'   # id optional (auto)\n" +
         "GET     curl -s \"$G/get?coll=leads&id=l1\" -H \"$A\"\n" +
         "DEL     curl -s -X POST $G/del -H \"$A\" -d '{\"coll\":\"leads\",\"id\":\"l1\"}'\n" +
-        "FIND    curl -s \"$G/find?coll=leads&where=score%3E%3D5&limit=50\" -H \"$A\"      # where: f=v,f2>v2 (AND; = > < >= <= ~=contains; dotted paths reach nested fields)\n" +
+        "FIND    curl -s \"$G/find?coll=leads&where=score%3E%3D5&limit=50\" -H \"$A\"      # where: f=v,f2>v2 (AND; = > < >= <= ~=contains; f=a|b = ANY of; dotted paths reach nested)\n" +
         "ORDER   curl -s \"$G/find?coll=events&order=ts&desc=1&limit=5\" -H \"$A\"          # THE LATEST N. Needs a range index on the field (INDEX with kind:\"range\"); without an order, a limit returns an ARBITRARY subset. Ties break by id, so the order is total.\n" +
         "PAGE    curl -s \"$G/find?coll=events&order=ts&desc=1&limit=5&after=<next>\" -H \"$A\"   # KEYSET paging: the response carries next; pass it back. Every page costs the same, and rows added/removed elsewhere cannot make one repeat or be skipped. next is omitted on a short page = stop. (A row MODIFIED between pages moves in the order and can be seen twice or missed.)\n" +
         "COUNT   curl -s \"$G/count?coll=leads&where=co%3Dacme\" -H \"$A\"                 # O(1) if the field is indexed\n" +

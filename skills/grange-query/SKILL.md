@@ -33,7 +33,25 @@ status=active,score>=10,name~=smith,user.id=7
 ```
 
 Equality, numeric `> < >= <=`, `~=` substring, and dotted paths into nested
-documents. A value containing `,` or `=` is not expressible — fetch by id.
+documents. A value containing `,`, `=` or `|` is not expressible — fetch by id.
+
+## OR, as alternatives on one field
+
+`field=a|b|c` matches **any** of the alternatives — an IN clause:
+
+```
+status=active|pending           # either status
+status=active|pending,score>=10 # ...AND a score floor
+```
+
+On an equality-indexed field this is a **union of index buckets**, not a scan:
+`mode` comes back `indexed-union` (hot) or `cold-index` (cold), and `scanned`
+counts the union rather than the collection.
+
+There is no arbitrary boolean OR across *different* fields — the comma is always
+AND, and `~=` treats `|` as a literal byte. If you need `a=1 OR b=2`, run two
+queries. Alternatives were chosen precisely because every one of them stays an
+index lookup; a general OR would not.
 
 ## Time windows are one span, not two scans
 
@@ -95,6 +113,7 @@ you are paying per token, ask for fields.
 
 - a range clause on a field with no `--range` index
 - any `~=` substring clause
+- `a|b` alternatives on a `--range` field (an *equality* index unions them instead)
 - multi-clause queries whose fields are all unindexed
 
 ## Budgets, on a shared server

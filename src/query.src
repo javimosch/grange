@@ -80,6 +80,24 @@ func wh_pairs(wh) (fields, ops, vals) {
     }
 }
 
+// wh_eq_any: does the document token equal the clause value, or any of its
+// `|`-separated alternatives? Values are matched both bare and quoted, exactly
+// as a single value always was.
+func wh_eq_any(got, want) (yes) {
+    yes = 0
+    if got == want || got == "\"" + want + "\"" { yes = 1  return }
+    if contains(want, "|") == false { return }
+    alts := split(want, "|")
+    i := 0
+    while i < len(alts) {
+        a := alts[i]
+        if len(a) > 0 {
+            if got == a || got == "\"" + a + "\"" { yes = 1  return }
+        }
+        i = i + 1
+    }
+}
+
 func wh_match(doc, fields, ops, vals) (m) {
     m = 1
     i := 0
@@ -87,7 +105,13 @@ func wh_match(doc, fields, ops, vals) (m) {
         got, err := json_get(doc, "." + fields[i])
         if len(err) > 0 { m = 0  return }
         if ops[i] == "=" {
-            if got != vals[i] && got != "\"" + vals[i] + "\"" { m = 0  return }
+            // `field=a|b|c` matches ANY of the alternatives — an IN clause, and
+            // the one shape people actually reach for when they ask for OR. It
+            // is deliberately NOT arbitrary boolean OR across different fields:
+            // that needs an expression tree and would change how clauses
+            // intersect, whereas alternatives stay indexable (a union of bucket
+            // lookups) and cannot be confused with the comma that means AND.
+            if wh_eq_any(got, vals[i]) == 0 { m = 0  return }
         } else {
             if ops[i] == "~=" {
                 hay := to_lower(wh_unquote(got))
@@ -114,8 +138,34 @@ func wh_candidates(fields, ops, vals) (ids, mode) {
     i := 0
     while i < len(fields) {
         if ops[i] == "=" && ix_is_indexed(fields[i]) == 1 {
-            ids = g_buckets[ix_bucket(fields[i], vals[i])]
-            mode = "indexed"
+            if contains(vals[i], "|") == false {
+                ids = g_buckets[ix_bucket(fields[i], vals[i])]
+                mode = "indexed"
+                return
+            }
+            // an IN clause is a UNION of buckets — the reason alternatives were
+            // chosen over arbitrary boolean OR: each alternative is still an
+            // exact index lookup, so `status=active|pending` reads two buckets
+            // instead of scanning the collection. Every candidate is re-verified
+            // by wh_match anyway, so a union can only ever narrow the work.
+            alts := split(vals[i], "|")
+            seen := make(map[string]int)
+            a := 0
+            while a < len(alts) {
+                if len(alts[a]) > 0 {
+                    bucket := g_buckets[ix_bucket(fields[i], alts[a])]
+                    j := 0
+                    while j < len(bucket) {
+                        if has(seen, bucket[j]) == false {
+                            seen[bucket[j]] = 1
+                            ids = append(ids, bucket[j])
+                        }
+                        j = j + 1
+                    }
+                }
+                a = a + 1
+            }
+            mode = "indexed-union"
             return
         }
         i = i + 1
@@ -267,8 +317,11 @@ func q_count(wh) (data) {
         data = "{\"count\":" + str(n) + ",\"mode\":\"cold-scan\"" + q_cost_json() + "}"
         return
     }
-    // O(1) fast path: a single equality clause on an indexed field
-    if len(fields) == 1 && ops[0] == "=" && ix_is_indexed(fields[0]) == 1 {
+    // O(1) fast path: a single equality clause on an indexed field. An IN clause
+    // (`field=a|b`) is excluded: one bucket register cannot answer it, and
+    // reading the bucket for the literal "a|b" answers 0 — the shape of bug that
+    // returns a confident wrong number rather than failing.
+    if len(fields) == 1 && ops[0] == "=" && ix_is_indexed(fields[0]) == 1 && contains(vals[0], "|") == false {
         data = "{\"count\":" + str(g_bcount[ix_bucket(fields[0], vals[0])]) + ",\"mode\":\"indexed\"" + q_cost_json() + "}"
         return
     }

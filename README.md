@@ -267,7 +267,10 @@ make verify   # check + tests (69) + 100k bench + crash harness
   it stays two binary searches; on cold collections the same query goes through the range index
   (`cold-index-multi`). Clauses on different fields are intersected per-index, then the survivors
   are resolved. What still scans: a range clause on a field with no `--range` index, and any
-  substring (`~=`) clause. Aggregate registers cover count/sum/avg; `--minmax` computes min/max on
+  substring (`~=`) clause. `field=a|b|c` matches ANY of the alternatives — the OR that is
+  expressible — and on an equality-indexed field it is a UNION of buckets rather than a scan
+  (`indexed-union`); arbitrary boolean OR across different fields is not supported, the comma
+  is always AND. Aggregate registers cover count/sum/avg; `--minmax` computes min/max on
   the scan path. Every response reports the plan (`mode`) and what it cost (`scanned`, `pages`),
   so this is checkable rather than trusted.
 - ORDERED queries: `?order=<field>&desc=1` (`--order`/`--desc` on the CLI, `order`/`desc` in every
