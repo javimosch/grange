@@ -248,8 +248,22 @@ the simplest thing that cannot be wrong:
 
 ```sh
 make build    # needs machin >= 0.108
-make verify   # check + tests (69) + 100k bench + crash harness
+make verify   # the whole gate: 21 harnesses, 388 unit assertions, 100k bench,
+              # crash + mutation-tested differential fuzzes
 ```
+
+Individually: `make test doccoverage inclause pagination projection durability
+isolation replicas retention indexbuild routes journey backup guide sdkversion
+embed soak bench crash fuzz`. Two of them exist because documentation drift is a
+functional bug in an agent-first tool — `make guide` checks the guide is
+truthful, `make doccoverage` checks it is complete, by enumerating every verb,
+route, `GRANGE_*` variable, flag and operator out of the source and failing on
+any that the guide does not document.
+
+**Is it production ready?** The verdict, including what is *not* ready, is at the
+end of [docs/OPERATIONS.md](docs/OPERATIONS.md) — the short version is that it is
+suitable for a service whose failure you can tolerate, and that its one
+irreducible gap is that nobody but its author has run it.
 
 ## Scope & honesty (M5)
 

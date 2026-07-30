@@ -16,6 +16,11 @@ Every client covers the whole HTTP API: `put/get/del/find/count/agg/index`,
 bulk (`putMany`/`delMany`), `watch`, `cold`, `compact`, `verify`, `export`
 (JSON or NDJSON lines), `collections`/`dbs`/`stats`/`usage`. Each file's header
 comment is the usage example; the wire contract is
-`/llms.txt` on any grange server. Signup for the hosted instance is self-serve
+`/llms.txt` on any grange server.
+
+The `where` argument is passed through verbatim, so every client gets the same
+filter language without a release: comma-separated clauses ANDed, `= > < >= <=`,
+`~=` substring, dotted paths for nested fields, and `field=a|b|c` for ANY of
+several values. `grange guide` (or `/guide`) is the reference. Signup for the hosted instance is self-serve
 with a [peage](https://peage.intrane.fr) wallet (`signup()` in the Node SDK, or
 one curl — see /llms.txt).

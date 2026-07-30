@@ -1366,3 +1366,80 @@ Honest reading: alternatives only *avoid* a scan when the field carries an
 equality index — production declares neither `device` nor `browser`, so those
 queries scan, exactly as `guide`'s `still_scans` says. The union is a planning
 win where an index exists, not everywhere.
+
+## M50: is grange production ready?
+
+The milestone run from M45 was aimed at a stated end state — "production ready
+and 100% documented for agents". Here is the verdict, with the parts that are
+not ready named rather than omitted.
+
+### What "documented" now means mechanically
+
+`scripts/doccoverage_test.sh` (`make doccoverage`) enumerates the dev-facing
+surface **out of the source** — every CLI verb, every HTTP route, every
+`GRANGE_*` variable, every flag, every `where` operator — and fails if any of
+them is absent from the section of `grange guide` that is supposed to carry it.
+Currently: 16 verbs, 22 routes, 12 operator-facing variables, 22 flags.
+
+Two things it does *not* prove, stated plainly: the prose could be wrong while
+every name is present, and the exclusion lists (internal tuning knobs,
+bench-only flags) are a judgement I made — each entry carries its reason in the
+script, and removing a name from a list is how a knob that becomes part of the
+interface gets forced into the guide.
+
+Its first version passed all ten checks immediately, which was not completeness:
+it grepped the whole guide JSON, and "get" occurs in a dozen unrelated
+sentences. Anchoring each lookup to the owning section made three of four
+sabotages fail correctly — and the fourth exposed the check itself. Testing for
+a bare `|` passed even with every mention of alternatives deleted, because the
+pagination cursor format is `<value>|<id>`: the character was present,
+documenting something else. Anchored per-operator, it then found a genuine gap —
+the guide had never stated the cursor's format at all, only that a cursor
+existed. That is now documented.
+
+### Ready
+
+- **Durability.** fsync of content and directory before ack, asserted at syscall
+  level. Crash recovery exercised by `kill -9` harnesses, hot and cold.
+- **Integrity.** `verify` walks every file and every checksum; exit 92 is
+  machine-checkable. Cold and replication paths are covered by mutation-tested
+  differential fuzzes, which found three silent-divergence bugs.
+- **Backups.** Nightly timer, verified copy, pruning — and now actually
+  restored, from the real artifact, by `restore_drill.sh`.
+- **Read scale-out.** Replicas over the same directory; a scan on one leaves the
+  others at 0.4 ms p90.
+- **Cost visibility.** Every response reports `mode`, `scanned`, `pages`, and
+  scan budgets refuse rather than degrade.
+- **Alerting.** `/ready` distinguishes liveness from readiness, alerts on
+  transitions only, and — since M49 — reports sibling units in restart loops.
+- **The product path.** Signup → write → query → bill, walked end to end
+  against the hosted instance with a real payment-rail wallet.
+- **Documentation.** As above, enforced by two harnesses from both directions:
+  nothing present is undocumented, nothing documented is missing.
+
+### Not ready, and why
+
+- **Adoption is approximately zero.** Two consumers exist: poche (embeds the
+  engine) and the vigie mirror (1258 documents). Every performance and
+  durability claim here is therefore measured on a workload I wrote myself.
+  This is the largest gap and no harness can close it.
+- **Single-writer.** `serve` is single-actor: one request at a time. An
+  expensive query blocks the rest, which is why budgets and replicas exist. It
+  is a real ceiling, not a tuning matter.
+- **Memory is bounded, not proven flat.** The watchdog restarts rather than
+  prevents, and `GRANGE_RESET_EVERY` is opt-in because a reset cannot preserve a
+  generated token (M38). Cold storage keeps 200k documents at 4.4 MB RSS; hot
+  collections still scale with data.
+- **One unexplained flake.** A crash-harness run in M33 failed once and has
+  never reproduced. I destroyed its output before reading it. It is recorded
+  here rather than forgotten.
+- **npm is a version behind** pending an OTP only the owner can supply; PyPI and
+  Go are current.
+
+### The honest summary
+
+Suitable for a service whose failure you can tolerate, run by someone who reads
+the `mode` field. It has been operated in production continuously, has survived
+its own fuzzes and crash harnesses, and reports what it costs. It has not been
+operated by anyone but me, and until it has, "production ready" means ready for
+*this* production.

@@ -62,6 +62,9 @@ pagination: build
 inclause: build
 	./scripts/inclause_test.sh
 
+doccoverage: build
+	./scripts/doccoverage_test.sh
+
 soak: build
 	./scripts/soak_test.sh ./$(BIN)
 
@@ -73,9 +76,9 @@ fuzz: build
 	./scripts/fuzz_cold.sh 1200 6
 	python3 scripts/fuzz_replica.py 150 3
 
-verify: check test embed guide sdkversion journey backup projection routes durability isolation pagination inclause indexbuild retention replicas soak bench crash fuzz
+verify: check test embed guide sdkversion journey backup projection routes durability isolation pagination inclause doccoverage indexbuild retention replicas soak bench crash fuzz
 
 clean:
 	rm -f $(BIN) $(BIN).mfl
 
-.PHONY: build check test embed guide sdkversion journey backup projection routes durability isolation pagination inclause indexbuild retention replicas soak bench crash verify clean
+.PHONY: build check test embed guide sdkversion journey backup projection routes durability isolation pagination inclause doccoverage indexbuild retention replicas soak bench crash verify clean

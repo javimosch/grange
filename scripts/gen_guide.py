@@ -20,7 +20,7 @@ import re
 import sys
 from pathlib import Path
 
-VERSION = "0.12.3"
+VERSION = "0.13.0"
 
 GUIDE = {
     "tool": "grange",
@@ -97,7 +97,8 @@ GUIDE = {
         ),
         "pagination": (
             "keyset, not offset: an ordered response carries `next`, and --after/?after= resumes "
-            "strictly past it. Every page costs the same, and rows inserted or deleted elsewhere "
+            "strictly past it. A cursor is `<value>|<id>` — the ordered field's value and the document id that breaks ties, which is what makes the order total and the resume exact; treat it as opaque and pass it back unchanged. "
+            "Every page costs the same, and rows inserted or deleted elsewhere "
             "cannot make a row repeat or be skipped. `next` is omitted on a short page, which is how "
             "you know to stop. A row MODIFIED between pages moves in the order and can be seen twice "
             "or missed — inherent without a snapshot."
