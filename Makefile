@@ -5,6 +5,27 @@ build:
 	machin encode $(SRCS) > $(BIN).mfl
 	machin build $(BIN).mfl -o $(BIN)
 
+# The RELEASE artifact is static, and it is a different binary from `make build`.
+#
+# `make build` links against the host's libssl, libcrypto, libsqlite3 and glibc,
+# because that is machin's default. That binary was published for every release
+# up to v0.13.0 under a README promising "statically linked, no runtime
+# dependencies, no glibc floor" — it required glibc 2.34+ and SQLite at runtime,
+# so it would not start on Debian 11, Ubuntu 20.04, RHEL 8, Alpine, or a slim
+# container. Nobody hit it because nobody had downloaded it.
+#
+# 7.5 MB instead of 321 KB. Insert throughput is unchanged (104-130k/s either
+# way, measured three times alternating).
+release: 
+	machin encode $(SRCS) > $(BIN).mfl
+	machin build $(BIN).mfl -o $(BIN)-linux-x86_64 --static
+	@file $(BIN)-linux-x86_64 | grep -q "statically linked" \
+	  || { echo "release binary is NOT static — refusing"; exit 1; }
+	@ldd $(BIN)-linux-x86_64 2>&1 | grep -q "not a dynamic executable" \
+	  || { echo "release binary has dynamic dependencies — refusing"; exit 1; }
+	@./$(BIN)-linux-x86_64 guide >/dev/null || { echo "release binary does not run"; exit 1; }
+	@echo "release binary ok: $$(ls -l $(BIN)-linux-x86_64 | awk '{print $$5}') bytes, static"
+
 check:
 	machin check $(SRCS)
 
@@ -65,6 +86,12 @@ inclause: build
 doccoverage: build
 	./scripts/doccoverage_test.sh
 
+# NOT in `verify`: it tests the PUBLISHED release, which by definition does not
+# exist yet while you are verifying the thing you are about to publish. Run it
+# after a release, which is when its answer is meaningful.
+stranger:
+	./scripts/stranger_test.sh
+
 soak: build
 	./scripts/soak_test.sh ./$(BIN)
 
@@ -81,4 +108,4 @@ verify: check test embed guide sdkversion journey backup projection routes durab
 clean:
 	rm -f $(BIN) $(BIN).mfl
 
-.PHONY: build check test embed guide sdkversion journey backup projection routes durability isolation pagination inclause doccoverage indexbuild retention replicas soak bench crash verify clean
+.PHONY: build release stranger check test embed guide sdkversion journey backup projection routes durability isolation pagination inclause doccoverage indexbuild retention replicas soak bench crash verify clean

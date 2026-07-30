@@ -29,10 +29,21 @@ chmod +x grange
 ./grange guide          # the version-exact feature catalog; start here
 ```
 
-Statically linked, no runtime dependencies — it runs on any linux x86-64, with
-no glibc floor. Linux x86-64 is the only published build: machin cross-compiles
-to wasm and Windows, but a database server needs POSIX, so those targets are not
-useful here. On another platform, build it yourself — `make build` needs only
+Statically linked (musl, 7.5 MB), no runtime dependencies and no glibc floor —
+it runs on any linux x86-64, including Alpine and `FROM scratch` containers.
+Verified by `make release`, which refuses to produce a binary that is not static.
+
+> Releases up to and including v0.13.0 shipped a **dynamically** linked binary
+> under this same paragraph: it needed glibc 2.34+, libssl, libcrypto and
+> libsqlite3, so it would not have started on Debian 11, Ubuntu 20.04, RHEL 8 or
+> Alpine. The install command above also pointed at an asset name that was never
+> published, so it returned 404. Both were found in M51 by running this block
+> verbatim as a stranger would, which no test had ever done. `make stranger` does
+> it now, against the published release.
+
+Linux x86-64 is the only published build: machin cross-compiles to wasm and
+Windows, but a database server needs POSIX, so those targets are not useful
+here. On another platform, build it yourself — `make build` needs only
 [machin](https://github.com/javimosch/machin).
 
 First run, end to end:
