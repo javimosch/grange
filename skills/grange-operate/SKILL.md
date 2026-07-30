@@ -75,6 +75,33 @@ manifest-vs-pages agreement, declared indexes — and exits 92 when anything is
 wrong. Run it after moving a database between machines, and in any backup job:
 it catches damage in files a query happens not to read.
 
+## Backups
+
+```sh
+scripts/backup.sh --db /data/db --out /backups/grange --keep 7
+```
+
+Copy, verify, prune — in that order, and the order matters. A plain file copy is
+a valid backup *while the database is being written*, because .grg files are
+written once and never mutated, manifests are written last, and recovery drops a
+torn final chunk: the copy can lose the in-flight commit and nothing else.
+Measured under continuous writes: source 165 documents, restored 162, every one
+whole.
+
+What makes it a backup rather than a copy is `grange verify` on every collection.
+A corrupt source exits **92** and the failed copy is KEPT for inspection;
+pruning happens only after a good backup exists, so a run of failures never
+empties the retention window.
+
+**Tenant databases live in a sibling `<db>.tenants` directory.** A backup script
+that copies only `--db` silently omits every paying customer. This one takes both
+and lays them out as `<stamp>/<name>` and `<stamp>/<name>.tenants`, so restoring
+is a copy back into place with no renaming.
+
+Run it from a timer, not by hand — on dk1 it is `grange-backup.timer` at 03:30
+UTC with `Persistent=true`. Until M45 the release notes claimed nightly backups
+and there was no timer, no cron and no backup directory at all.
+
 ## Cold storage
 
 `POST /cold?coll=C` converts a collection to disk-resident pages. Use it for

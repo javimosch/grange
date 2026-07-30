@@ -20,7 +20,7 @@ import re
 import sys
 from pathlib import Path
 
-VERSION = "0.11.0"
+VERSION = "0.11.1"
 
 GUIDE = {
     "tool": "grange",
@@ -149,6 +149,15 @@ GUIDE = {
         "GRANGE_IDX_BATCH": "records per batch when building a cold index",
         "GRANGE_RANGE_PAGE": "entries per sorted range-index page",
     },
+    "backup": (
+        "a plain file copy is a valid backup even while the database is being written: every .grg file "
+        "is written once and never mutated, cold manifests are written LAST, and recovery drops a torn "
+        "final chunk — so a copy can lose the in-flight commit and nothing else. What makes it a backup "
+        "rather than a copy is verifying it: scripts/backup.sh copies, runs `verify` on every collection "
+        "(exit 92 if anything is wrong), keeps a failed copy for inspection, and prunes only after a good "
+        "one exists. Tenant databases live in a sibling <db>.tenants directory and are included — a "
+        "backup that omits every paying tenant is worse than none. Restore is a copy back into place."
+    ),
     "embed": (
         "grange is usable as a LIBRARY, not only a server: compile src/engine.src registry.src "
         "cold.src coldindex.src coldrange.src coldsort.src index.src range.src qcost.src query.src "

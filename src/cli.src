@@ -233,11 +233,11 @@ func cmd_torture(fs) {
 // MISLEADS rather than merely omits: this claimed "no fsync builtin yet" for
 // ten milestones after fsync shipped. scripts/guide_test.sh fails when a verb,
 // route or GRANGE_* variable exists in src/ but not in the guide.
-func grange_version() (v) { v = "0.11.0" }
+func grange_version() (v) { v = "0.11.1" }
 
 func cmd_guide() {
     s := ""
-    s = s + "{\"tool\":\"grange\",\"version\":\"0.11.0\",\"model\":\"document store: collections of minified-JSON docs keyed by id. A collection is HOT (whole data"
+    s = s + "{\"tool\":\"grange\",\"version\":\"0.11.1\",\"model\":\"document store: collections of minified-JSON docs keyed by id. A collection is HOT (whole data"
     s = s + "set in memory, the memtable IS the database) or COLD (disk-resident, hash-partitioned pages + run manifests; convert with POST /cold). Writes stage in"
     s = s + " memory and become durable at commit: one immutable checksummed WAL chunk per commit, fsynced before the write is acknowledged. Recovery replays the n"
     s = s + "ewest valid segment + its valid chunks; a torn last chunk is dropped, so a commit is all-or-nothing.\",\"loop\":[\"put --db d --doc '{...}' -> {id}\","
@@ -290,21 +290,26 @@ func cmd_guide() {
     s = s + "ed run during an external index build\",\"GRANGE_SORT_EXTERNAL\":\"1/0 forces the external or in-memory index build (testing)\",\"GRANGE_SORT_EXTERNAL"
     s = s + "_PAGES\":\"run size in pages above which a build spills\",\"GRANGE_BULK_DIRECT\":\"1 forces the direct-to-run bulk path (testing)\",\"GRANGE_BULK_PASS"
     s = s + "\":\"records held per pass when writing a bulk run\",\"GRANGE_IDX_PARTS\":\"partitions per cold equality index\",\"GRANGE_IDX_BATCH\":\"records per ba"
-    s = s + "tch when building a cold index\",\"GRANGE_RANGE_PAGE\":\"entries per sorted range-index page\"},\"embed\":\"grange is usable as a LIBRARY, not only a "
-    s = s + "server: compile src/engine.src registry.src cold.src coldindex.src coldrange.src coldsort.src index.src range.src qcost.src query.src order.src into y"
-    s = s + "our own machin binary and call gr_use/gr_put/gr_commit/q_find/q_find_page directly. gr_reset() reclaims the arena and FREES everything the caller is h"
-    s = s + "olding, so call it between requests with nothing in flight. scripts/embed_test.sh pins this contract.\",\"edge_cases\":[\"docs must be single-line min"
-    s = s + "ified JSON\",\"ids: no | / newline or slash\",\"a bulk request is capped at 50000 ops and is all-or-nothing: a malformed line applies nothing\",\"a re"
-    s = s + "plica (--follow) refuses writes; two writers on one directory would corrupt it\",\"gr_reset()/arena reset invalidates values the caller still holds, n"
-    s = s + "ot just grange's internals\"],\"exit_codes\":{\"0\":\"ok\",\"80-89\":\"input\",\"90-99\":\"not found\",\"92\":\"verify found corruption\",\"110-119\":"
-    s = s + "\"internal\"},\"hosted\":{\"url\":\"https://grange.intrane.fr\",\"signup\":\"POST /tenants with X-Peage-Wallet: pw_... -> isolated metered namespace +"
-    s = s + " gt_ token\",\"pricing\":\"pay-as-you-go storage, 15 cents/GB/month above 50MB free, billed via peage (https://peage.intrane.fr/llms.txt)\"}}"
+    s = s + "tch when building a cold index\",\"GRANGE_RANGE_PAGE\":\"entries per sorted range-index page\"},\"backup\":\"a plain file copy is a valid backup even "
+    s = s + "while the database is being written: every .grg file is written once and never mutated, cold manifests are written LAST, and recovery drops a torn fin"
+    s = s + "al chunk — so a copy can lose the in-flight commit and nothing else. What makes it a backup rather than a copy is verifying it: scripts/backup.sh copi"
+    s = s + "es, runs `verify` on every collection (exit 92 if anything is wrong), keeps a failed copy for inspection, and prunes only after a good one exists. Ten"
+    s = s + "ant databases live in a sibling <db>.tenants directory and are included — a backup that omits every paying tenant is worse than none. Restore is a cop"
+    s = s + "y back into place.\",\"embed\":\"grange is usable as a LIBRARY, not only a server: compile src/engine.src registry.src cold.src coldindex.src coldrang"
+    s = s + "e.src coldsort.src index.src range.src qcost.src query.src order.src into your own machin binary and call gr_use/gr_put/gr_commit/q_find/q_find_page d"
+    s = s + "irectly. gr_reset() reclaims the arena and FREES everything the caller is holding, so call it between requests with nothing in flight. scripts/embed_t"
+    s = s + "est.sh pins this contract.\",\"edge_cases\":[\"docs must be single-line minified JSON\",\"ids: no | / newline or slash\",\"a bulk request is capped at"
+    s = s + " 50000 ops and is all-or-nothing: a malformed line applies nothing\",\"a replica (--follow) refuses writes; two writers on one directory would corrupt"
+    s = s + " it\",\"gr_reset()/arena reset invalidates values the caller still holds, not just grange's internals\"],\"exit_codes\":{\"0\":\"ok\",\"80-89\":\"inpu"
+    s = s + "t\",\"90-99\":\"not found\",\"92\":\"verify found corruption\",\"110-119\":\"internal\"},\"hosted\":{\"url\":\"https://grange.intrane.fr\",\"signup\":"
+    s = s + "\"POST /tenants with X-Peage-Wallet: pw_... -> isolated metered namespace + gt_ token\",\"pricing\":\"pay-as-you-go storage, 15 cents/GB/month above 5"
+    s = s + "0MB free, billed via peage (https://peage.intrane.fr/llms.txt)\"}}"
     println(s)
 }
 
 func cmd_help_json() {
     s := ""
-    s = s + "{\"tool\":\"grange\",\"version\":\"0.11.0\",\"summary\":\"machin-native document database — agent-first, single binary, embeddable or served\",\"comma"
+    s = s + "{\"tool\":\"grange\",\"version\":\"0.11.1\",\"summary\":\"machin-native document database — agent-first, single binary, embeddable or served\",\"comma"
     s = s + "nds\":[{\"name\":\"put\",\"flags\":[\"--db\",\"--coll\",\"--id\",\"--doc\",\"--ttl\"],\"out\":\"{id}\"},{\"name\":\"get\",\"flags\":[\"--db\",\"--coll"
     s = s + "\",\"--id\"],\"out\":\"{id,doc}\"},{\"name\":\"del\",\"flags\":[\"--db\",\"--coll\",\"--id\"],\"out\":\"{id,deleted}\"},{\"name\":\"find\",\"flags\":["
     s = s + "\"--db\",\"--coll\",\"--where\",\"--limit\",\"--order\",\"--desc\",\"--after\",\"--fields\"],\"out\":\"{count,mode,scanned,pages,next,items}\"},{\"nam"

@@ -1110,3 +1110,52 @@ Two of my attempts at that control were themselves broken: one removed the wrong
 build left the good binary in place and everything "passed". Injecting the exact
 production failure — commenting out the one assignment — is what finally proved
 the harness works.
+
+## M45: backups that exist
+
+The v0.9.0 release notes said "Nightly backups." There were none: no timer, no
+cron entry, no backup directory on the host. The claim was written before the
+mechanism existed and never became true — the worst kind of production gap,
+because everyone believes it is covered. That note has been corrected in place,
+like the SDK claim in M44.
+
+    scripts/backup.sh --db /data/db --out /backups/grange --keep 7
+
+Copy, verify, prune — in that order.
+
+### Why a plain copy is a valid backup here
+
+A grange database can be copied WHILE it is being written, and that follows from
+the format rather than from luck: every `.grg` file is written exactly once and
+never mutated, a cold run's manifest is written LAST, and recovery drops a torn
+final chunk. So the worst a concurrent write can do to a copy is leave a chunk
+recovery discards — the same all-or-nothing commit boundary `make crash` proves.
+
+Measured under continuous writes: source 165 documents, restored 162, every one
+whole and the restored database writable.
+
+What makes it a backup rather than a copy is the verification. Every collection
+in the copy is checked with `grange verify`, which walks each file's checksum and
+record stream, a cold manifest against its pages, and the declared indexes. A
+corrupt source exits 92, and the failed copy is KEPT rather than pruned —
+deleting the evidence of a failed backup is how you find out about it much later.
+Pruning happens only after a good backup exists, so a run of failures never
+empties the retention window.
+
+### Tenant databases are the ones that matter
+
+They live in a sibling `<db>.tenants` directory, so the obvious `cp -a $DB`
+silently omits every paying customer. The script takes both.
+
+The first version put the tenant roots BESIDE the stamped directory, which made
+one backup look like two entries to the retention pass — it would have pruned
+half of a backup. The layout is now `<stamp>/<name>` and
+`<stamp>/<name>.tenants`, mirroring the source so a restore is a copy back into
+place with no renaming, and the harness asserts that one backup is one retention
+entry.
+
+### On dk1
+
+`grange-backup.timer` at 03:30 UTC, `Persistent=true`, keeping 7. Verified
+against production data: the restored copy of the live analytics mirror counted
+1160 documents against the source's 1160, and `verify` reported it intact.
