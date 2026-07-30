@@ -83,5 +83,10 @@ if [ "$KEEP" -gt 0 ]; then
   done
 fi
 
+# record success where /ready can see it: a backup job that stops running is
+# invisible otherwise, and "the monitor was green" is how people discover months
+# later that there were no backups
+date +%s > "$DB/.last_backup" 2>/dev/null || true
+
 KEPT=$(ls -1d "$OUT"/*/ 2>/dev/null | wc -l)
 echo "{\"ok\":true,\"stamp\":\"$STAMP\",\"path\":\"$DEST\",\"bytes\":${BYTES:-0},\"collections_verified\":$checked,\"kept\":$KEPT}"

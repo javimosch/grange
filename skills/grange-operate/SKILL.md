@@ -75,6 +75,30 @@ manifest-vs-pages agreement, declared indexes — and exits 92 when anything is
 wrong. Run it after moving a database between machines, and in any backup job:
 it catches damage in files a query happens not to read.
 
+## Liveness is not readiness
+
+`/health` answers "up" as soon as the accept loop runs. It stays green while the
+data directory has gone read-only, recovery quietly dropped chunks, RSS is about
+to trip the watchdog, or the nightly backup stopped weeks ago. Those are the
+failures that rot silently.
+
+```sh
+curl -s "$URL/ready" -H "authorization: Bearer $TOKEN"
+```
+
+`/ready` answers **503** when any of those is true, and lists what is failing. It
+reads no pages and runs no verify, so it is cheap to poll. No backup marker at
+all reports `null` rather than failing — plenty of deployments have no backup
+job, and a false alarm teaches people to ignore the endpoint.
+
+Point a monitor at `/health` for liveness and run `scripts/readycheck.sh` from a
+timer for readiness. It alerts **only on transitions** and reports recovery,
+because a message every 15 minutes while something is wrong gets muted, which is
+worse than no alert. It also distinguishes `down` (no response) from `failing`
+(responding, sick) — conflating them sends a misleading page.
+
+On dk1: `grange-ready.timer` every 15 minutes, Telegram on transition.
+
 ## Backups
 
 ```sh

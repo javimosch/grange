@@ -4,11 +4,16 @@
 
 var g_rss_last = 0
 
+// one accessor, so the watchdog and /ready cannot disagree about the limit
+func srv_rss_limit_mb() (mb) {
+    mb = parse_int(env("GRANGE_MAX_RSS_MB"))
+}
+
 func srv_rss_watchdog() {
     nowms := now_ms()
     if nowms - g_rss_last < 10000 { return }
     g_rss_last = nowms
-    maxmb := parse_int(env("GRANGE_MAX_RSS_MB"))
+    maxmb := srv_rss_limit_mb()
     if maxmb == 0 { maxmb = 300 }
     rss := bench_rss_kb()
     if rss < maxmb * 1024 { return }

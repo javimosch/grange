@@ -20,7 +20,7 @@ import re
 import sys
 from pathlib import Path
 
-VERSION = "0.11.1"
+VERSION = "0.12.0"
 
 GUIDE = {
     "tool": "grange",
@@ -69,7 +69,7 @@ GUIDE = {
         "help-json": "machine-readable command list",
     },
     "http": {
-        "read": "GET /get /find /count /agg /export /stats /verify /collections /dbs /usage /watch /health /guide",
+        "read": "GET /get /find /count /agg /export /stats /verify /collections /dbs /usage /watch /health /ready /guide",
         "write": "POST /put /del /bulk /index /cold /compact /tenants /shutdown",
         "auth": "Authorization: Bearer <token>. No anonymous access and no token query parameter.",
         "find_params": "coll, where, limit, order, desc=1, after=<cursor>, fields=a,b",
@@ -136,6 +136,7 @@ GUIDE = {
         "GRANGE_MAX_LOADED": "evict least-recently-used collections beyond this many",
         "GRANGE_MAX_RUNS": "compact a cold collection when it exceeds this many runs",
         "GRANGE_COLD_MEMTABLE": "flush a cold collection when the memtable reaches this many records",
+        "GRANGE_BACKUP_MAX_HOURS": "/ready reports not-ready when the last recorded backup is older than this (default 48)",
         "GRANGE_RATE_PER_MIN": "per-tenant request cap (hosted)",
         "GRANGE_PRICE_CENTS_GB_MONTH": "hosted storage price",
         "GRANGE_MERCHANT_KEY": "peage merchant key for hosted billing",
@@ -149,6 +150,17 @@ GUIDE = {
         "GRANGE_IDX_BATCH": "records per batch when building a cold index",
         "GRANGE_RANGE_PAGE": "entries per sorted range-index page",
     },
+    "readiness": (
+        "/health is liveness and stays trivial so a monitor can poll it often — it answers \"up\" as soon "
+        "as the accept loop runs. /ready is the deep check and answers 503 when something is actually "
+        "wrong: the data directory no longer writable, RSS within 10% of the watchdog limit (a restart "
+        "drops in-flight requests and parked watchers), recovery having skipped chunks, or the nightly "
+        "backup gone stale past GRANGE_BACKUP_MAX_HOURS (default 48; the backup script records a marker "
+        "on success). No backup marker at all reports null rather than failing, because plenty of "
+        "deployments have no backup job and a false alarm teaches people to ignore the endpoint. It reads "
+        "no pages and runs no verify, so it is cheap enough to poll. An agent can use it to decide whether "
+        "to trust a database it did not deploy."
+    ),
     "backup": (
         "a plain file copy is a valid backup even while the database is being written: every .grg file "
         "is written once and never mutated, cold manifests are written LAST, and recovery drops a torn "

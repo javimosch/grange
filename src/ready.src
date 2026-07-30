@@ -1,0 +1,105 @@
+// grange readiness — the difference between "the process is alive" and "this
+// database is fit to serve".
+//
+// /health returns {"status":"up"} as soon as the accept loop is running, and the
+// external monitor polls exactly that every 60 seconds. It stays green while:
+//
+//   · the data directory has gone read-only
+//   · recovery quietly dropped chunks on the last open
+//   · the nightly backup stopped running weeks ago
+//   · RSS is about to trip the watchdog and restart the process
+//
+// Those are the failures that rot silently, and none of them announce
+// themselves. /ready answers them, cheaply enough to poll: no full verify, no
+// scan, no page reads. It is a separate route ON PURPOSE — /health must stay
+// trivial so a monitor can hit it often, and a readiness probe that costs real
+// work would be the thing that takes the server down.
+//
+// An agent can use it too: ask before trusting a database you did not deploy.
+
+func rdy_backup_max_hours() (h) {
+    h = parse_int(env("GRANGE_BACKUP_MAX_HOURS"))
+    if h == 0 { h = 48 }
+}
+
+// rdy_backup_age_hours reads the marker the backup script writes on success.
+// Returns -1 when there is no marker, which is reported as "unknown" rather
+// than as a failure: plenty of deployments have no backup job, and inventing an
+// alarm for them would train people to ignore this endpoint.
+func rdy_backup_age_hours(root) (h) {
+    h = 0 - 1
+    raw := trim(read_file(root + "/.last_backup"))
+    if len(raw) == 0 { return }
+    then := parse_int(raw)
+    if then <= 0 { return }
+    h = (now() - then) / 3600
+}
+
+// rdy_writable proves the directory still accepts writes, which a full disk or a
+// remounted volume silently ends. It writes and removes one tiny file.
+func rdy_writable(root) (yes) {
+    yes = 0
+    probe := root + "/.ready_probe"
+    if write_file(probe, "1") < 0 { return }
+    if len(read_file(probe)) == 0 { return }
+    remove(probe)
+    yes = 1
+}
+
+// gr_ready assembles the report. Returns (json, ready) so the caller can pick
+// the HTTP status: a readiness probe that answers 200 while reporting failures
+// is decoration.
+func gr_ready(root) (data, ready) {
+    ready = 1
+    failing := []string{}
+
+    w := rdy_writable(root)
+    if w == 0 {
+        ready = 0
+        failing = append(failing, "\"not-writable\"")
+    }
+
+    rss := bench_rss_kb() / 1024
+    limit := srv_rss_limit_mb()
+    // 90% of the watchdog's limit means a restart is imminent, and a restart
+    // drops in-flight requests and parked watchers
+    near := 0
+    if limit > 0 && rss * 10 >= limit * 9 {
+        near = 1
+        ready = 0
+        failing = append(failing, "\"rss-near-limit\"")
+    }
+
+    // recovery dropping a chunk is normal ONCE after a crash (that is the
+    // committed-prefix guarantee working); a non-zero count is still worth
+    // surfacing, because nothing else reports it after startup
+    skipped := g_skipped_chunks
+
+    age := rdy_backup_age_hours(root)
+    agestr := "null"
+    if age >= 0 {
+        agestr = str(age)
+        if age > rdy_backup_max_hours() {
+            ready = 0
+            failing = append(failing, "\"backup-stale\"")
+        }
+    }
+
+    role := "primary"
+    if g_srv_follow == 1 { role = "follower" }
+
+    okstr := "true"
+    if ready == 0 { okstr = "false" }
+    data = "{\"ready\":" + okstr +
+        ",\"role\":\"" + role + "\"" +
+        ",\"writable\":" + str(w) +
+        ",\"rss_mb\":" + str(rss) +
+        ",\"rss_limit_mb\":" + str(limit) +
+        ",\"rss_near_limit\":" + str(near) +
+        ",\"chunks_skipped_on_open\":" + str(skipped) +
+        ",\"backup_age_hours\":" + agestr +
+        ",\"backup_max_hours\":" + str(rdy_backup_max_hours()) +
+        ",\"collections_loaded\":" + str(len(R_loaded)) +
+        ",\"version\":\"" + grange_version() + "\"" +
+        ",\"failing\":[" + join(failing, ",") + "]}"
+}

@@ -1159,3 +1159,49 @@ entry.
 `grange-backup.timer` at 03:30 UTC, `Persistent=true`, keeping 7. Verified
 against production data: the restored copy of the live analytics mirror counted
 1160 documents against the source's 1160, and `verify` reported it intact.
+
+## M46: liveness is not readiness
+
+grange was already monitored — perrus polls `/health` on the primary and the read
+replica every 60 seconds, with Telegram alerting configured. That check answers
+"up" as soon as the accept loop is running, and stays green through:
+
+  · a data directory that has gone read-only
+  · recovery having quietly dropped chunks on the last open
+  · RSS about to trip the watchdog (a restart drops in-flight requests and
+    parked watchers)
+  · the nightly backup having stopped weeks ago
+
+Which is to say: it would not have noticed the M45 gap. `GET /ready` answers
+those, returns **503** when any of them is true, and lists what is failing. It
+reads no pages and runs no verify — a readiness probe that costs real work is the
+thing that eventually takes the server down.
+
+Deliberate choices worth keeping:
+
+- **`/health` stays trivial.** Two endpoints, two purposes; merging them would
+  force every 60-second poll to pay for the deep check.
+- **No backup marker reports `null`, not a failure.** Plenty of deployments have
+  no backup job, and a false alarm teaches people to ignore the endpoint.
+- **`/ready` requires a token.** It reports RSS, version, collection count and
+  backup age — operational detail, not something to publish on a paid
+  multi-tenant service. That is why the checker runs on the host rather than
+  perrus polling it.
+
+### The alerting is the point
+
+`scripts/readycheck.sh` runs from a timer every 15 minutes and messages Telegram
+**only on transitions**, reporting recovery as well. A check that messages every
+15 minutes while something is wrong gets muted, which is worse than not alerting.
+It also distinguishes `down` (no response at all) from `failing` (responding, but
+sick) — conflating those sends a misleading page.
+
+One honesty fix while testing it: the JSON reported `alerted: true` on the very
+first observation, when it deliberately sends nothing. It now reports
+`transition` (the state changed) and `notified` (a message was actually sent)
+separately.
+
+Verified end to end on dk1: the first timer run caught a restarting server as
+`failing`, the next saw `ok`, and the transition sent a recovery notice.
+`/ready` on the primary reports `backup_age_hours: 0` against the nightly job,
+and the replica correctly reports `role: follower`.

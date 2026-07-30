@@ -109,6 +109,18 @@ func srv_tail_routes(req) (res, handled) {
         res = srv_ok("{\"gen\":" + str(g_gen) + ",\"docs\":" + str(gr_count()) + "}")
         return
     }
+    // /ready is the deep check; /health stays trivial so a monitor can poll it
+    // often. A failing readiness probe answers 503, because a probe that returns
+    // 200 while reporting failures is decoration.
+    if req.method == "GET" && has_prefix(req.path, "/ready") {
+        rdata, rok := gr_ready(g_srv_db)
+        if rok == 0 {
+            res = srv_json("503 Service Unavailable", "{\"ok\":false,\"error\":{\"type\":\"not-ready\",\"message\":\"readiness checks failing\"},\"data\":" + rdata + "}")
+            return
+        }
+        res = srv_ok(rdata)
+        return
+    }
     if req.method == "GET" && has_prefix(req.path, "/verify") {
         vdata, vissues := gr_verify(1)
         if vissues > 0 {

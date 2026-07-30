@@ -114,6 +114,12 @@ BRC=$?
 echo "$BADOUT" | grep -q kept_for_inspection && check "the failed backup is kept for inspection" 1 \
                                              || check "the failed backup is kept for inspection" 0
 
+# the backup must record its success where /ready can see it: a job that stops
+# running is invisible otherwise, which is exactly how "nightly backups" stayed
+# in the release notes for eleven days with no backups at all
+[ -f "$DB/.last_backup" ] && check "a successful backup records a marker for /ready" 1 \
+  || check "a successful backup records a marker for /ready" 0
+
 ENTRIES=$(ls -1d "$OUT"/*/ 2>/dev/null | wc -l)
 [ "$ENTRIES" = "1" ] && check "one backup is one retention entry" 1 \
   || check "one backup is one retention entry (found $ENTRIES: $(ls -1 "$OUT" | tr '\n' ' '))" 0

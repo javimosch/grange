@@ -35,6 +35,7 @@ probe() { # method path [body]
 }
 
 probe GET  /health
+probe GET  /ready
 probe GET  /collections
 probe GET  /stats
 probe GET  /usage
