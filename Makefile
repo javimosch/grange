@@ -1,3 +1,10 @@
+# The gate is not a user. `make verify` spawns grange several hundred times
+# across 22 harnesses — 75 `serve` events, 15 `count`, 11 `verify` in one run —
+# and to usage telemetry each fresh HOME is a new machine. Set once here so
+# every target inherits it, rather than in 28 scripts that each have to remember.
+# cli-telemetry-spec §2.2.1.
+export DO_NOT_TRACK = 1
+
 BIN = grange
 SRCS = framework/flags.src framework/machweb.src src/recfile.src src/engine.src src/registry.src src/cold.src src/coldbulk.src src/coldindex.src src/coldquery.src src/coldrange.src src/coldsort.src src/index.src src/range.src src/qcost.src src/project.src src/query.src src/order.src src/verify.src src/ready.src src/watch.src src/telemetry.src src/collect.src src/bench.src src/tenant.src src/landing.src src/servemeta.src src/servebulk.src src/serveread.src src/serve.src src/cli.src
 
