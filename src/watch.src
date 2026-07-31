@@ -54,7 +54,12 @@ func srv_write_res(fd, res) {
     // long-lived one, which only a per-request arena around the whole loop
     // would fix. See docs/OPERATIONS.md.)
     arena {
-        out := "HTTP/1.1 " + res.status + "\r\nContent-Type: " + res.ctype + "\r\nContent-Length: " + str(len(res.body)) + "\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n" + res.body
+        // HEAD is GET without the body (RFC 9110): the Content-Length still
+        // describes what a GET would return, so a client can size the fetch,
+        // but no body follows.
+        body := res.body
+        if g_req_method == "HEAD" { body = "" }
+        out := "HTTP/1.1 " + res.status + "\r\nContent-Type: " + res.ctype + "\r\nContent-Length: " + str(len(res.body)) + "\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n" + body
         write(fd, out)
     }
     close(fd)

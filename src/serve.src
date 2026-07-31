@@ -21,6 +21,9 @@ var g_w_since = []int{}
 var g_w_deadline = []int{}
 var g_park = 0
 var g_srv_follow = 0
+// The request method, so srv_write_res can drop the body on a HEAD without
+// threading the request through the writer (which watch_park also calls).
+var g_req_method = "GET"
 var g_shutdown = 0
 func srv_json(status, body) (res) {
     res = response(status, "application/json", body)
@@ -67,7 +70,7 @@ func srv_role(req) (role, tid) {
 // is how the inconsistency hid.
 func srv_route(p, r) (yes) {
     // returns a BOOL: every call site uses it directly as a condition
-    // (`if req.method == "GET" && srv_route(...)`), the way has_prefix did
+    // (`if srv_method(req) == "GET" && srv_route(...)`), the way has_prefix did
     yes = false
     if p == r { yes = true  return }
     if has_prefix(p, r + "?") { yes = true }
@@ -98,16 +101,31 @@ func srv_use(req, root) (ok) {
     ok = uok
 }
 
+// srv_method treats HEAD as GET for routing.
+//
+// A HEAD request used to match no GET route, fall through to the auth gate, and
+// answer 401 — including on /llms.txt, the one route the contract promises is
+// open to anyone. `curl -I https://grange.intrane.fr/llms.txt` said 401 while
+// `curl` said 200, so every link checker, uptime probe and cautious client was
+// told the front door was locked. No test in this repo had ever issued a HEAD.
+//
+// RFC 9110: HEAD is GET without the body. The body is dropped in srv_write_res,
+// where the response is serialised.
+func srv_method(req) (m) {
+    m = req.method
+    if m == "HEAD" { m = "GET" }
+}
+
 func srv_handle(req) (res) {
-    if req.method == "GET" && (req.path == "/" || req.path == "/index.html") {
+    if srv_method(req) == "GET" && (req.path == "/" || req.path == "/index.html") {
         res = ok_html(landing_html())
         return
     }
-    if req.method == "GET" && has_prefix(req.path, "/llms.txt") {
+    if srv_method(req) == "GET" && has_prefix(req.path, "/llms.txt") {
         res = ok_text(llms_txt())
         return
     }
-    if req.method == "GET" && srv_route(req.path, "/guide") {
+    if srv_method(req) == "GET" && srv_route(req.path, "/guide") {
         res = ok_text(llms_txt())
         return
     }
@@ -218,7 +236,7 @@ func srv_handle(req) (res) {
         res = srv_ok("{\"id\":\"" + jesc(id) + "\"}")
         return
     }
-    if req.method == "GET" && srv_route(req.path, "/get") {
+    if srv_method(req) == "GET" && srv_route(req.path, "/get") {
         id := query(req, "id")
         gr_sweep_expired()
         gdoc := ""
@@ -248,7 +266,7 @@ func srv_handle(req) (res) {
         res = srv_ok("{\"id\":\"" + jesc(id) + "\",\"deleted\":true}")
         return
     }
-    if req.method == "GET" && srv_route(req.path, "/find") {
+    if srv_method(req) == "GET" && srv_route(req.path, "/find") {
         limit := parse_int(query(req, "limit"))
         if limit == 0 { limit = 100 }
         wh := query(req, "where")
@@ -297,7 +315,7 @@ func srv_handle(req) (res) {
         res = bres
         return
     }
-    if req.method == "GET" && srv_route(req.path, "/watch") {
+    if srv_method(req) == "GET" && srv_route(req.path, "/watch") {
         since := parse_int(query(req, "since"))
         tmo := parse_int(query(req, "timeout"))
         if tmo < 1 { tmo = 25 }
@@ -457,6 +475,7 @@ func cmd_serve(fs) {
                 // that escape absent, so we do NOT wrap (a passing check here would
                 // be vacuous). The RSS watchdog + eviction bound memory instead.
                 // Upstream candidate: interprocedural ARENA001 provenance.
+                g_req_method = req.method
                 res := srv_handle(req)
                 if g_park > 0 {
                     since := parse_int(query(req, "since"))

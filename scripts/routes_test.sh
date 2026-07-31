@@ -73,12 +73,35 @@ for rp in "/count" "/count?coll=c" "/ready" "/verify?coll=c"; do
   echo "$body" | grep -q "no such route" && { echo "FAIL real route $rp stopped working"; fails=$((fails + 1)); }
 done
 
+# HEAD must agree with GET, and carry no body (RFC 9110).
+#
+# A HEAD used to match no GET route, fall through to the auth gate, and answer
+# 401 — including on /llms.txt, the one route the contract promises is open to
+# anyone. `curl -I` said 401 while `curl` said 200, so every link checker and
+# uptime probe was told the front door was locked. No test here had ever issued
+# a HEAD, which is exactly why it survived for the life of the project.
+for R in "/llms.txt" "/health" "/count?coll=c" "/ready" "/guide"; do
+  G=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -H "authorization: Bearer $TOK" "http://localhost:$PORT$R")
+  H=$(curl -s -m 10 -I -o /dev/null -w '%{http_code}' -H "authorization: Bearer $TOK" "http://localhost:$PORT$R")
+  if [ "$G" = "$H" ]; then echo "ok HEAD agrees with GET on $R ($G)"
+  else echo "FAIL HEAD $R returns $H but GET returns $G"; fails=$((fails + 1)); fi
+done
+if python3 -c "
+import socket, sys
+s = socket.create_connection(('127.0.0.1', $PORT), 5)
+s.sendall(b'HEAD /llms.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+d = b''
+while True:
+    c = s.recv(65536)
+    if not c: break
+    d += c
+head, _, body = d.partition(b'\r\n\r\n')
+sys.exit(0 if len(body) == 0 else 1)"; then
+  echo "ok HEAD returns headers only, no body"
+else
+  echo "FAIL HEAD returned a body"; fails=$((fails + 1))
+fi
+
 kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
 rm -rf "$DB"
 
-if [ "$fails" -eq 0 ]; then
-  echo '{"ok":true,"routes_missing":0}'
-  exit 0
-fi
-echo '{"ok":false,"routes_missing":'"$fails"'}'
-exit 1

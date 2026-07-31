@@ -13,7 +13,7 @@
 func srv_meta_routes(req, role, tid, root) (res, handled) {
     res = srv_err("404 Not Found", "not-found", "unreachable")
     handled = 1
-    if role == "tenant" && req.method == "GET" && srv_route(req.path, "/dbs") {
+    if role == "tenant" && srv_method(req) == "GET" && srv_route(req.path, "/dbs") {
         entries := list_dir(tn_root(tid))
         items := []string{}
         i := 0
@@ -26,7 +26,7 @@ func srv_meta_routes(req, role, tid, root) (res, handled) {
         res = srv_ok("{\"dbs\":[" + join(items, ",") + "]}")
         return
     }
-    if req.method == "GET" && srv_route(req.path, "/usage") {
+    if srv_method(req) == "GET" && srv_route(req.path, "/usage") {
         utid := tid
         if role == "admin" { utid = query(req, "tenant") }
         if len(utid) == 0 {
@@ -36,12 +36,12 @@ func srv_meta_routes(req, role, tid, root) (res, handled) {
         res = srv_ok(tn_usage(utid))
         return
     }
-    if role == "admin" && req.method == "GET" && srv_route(req.path, "/tenants") {
+    if role == "admin" && srv_method(req) == "GET" && srv_route(req.path, "/tenants") {
         ok2, errmsg2 := gr_use(g_srv_db, "_sys")
         res = srv_ok(q_find("", 1000))
         return
     }
-    if req.method == "GET" && srv_route(req.path, "/collections") {
+    if srv_method(req) == "GET" && srv_route(req.path, "/collections") {
         entries := list_dir(root)
         items := []string{}
         i := 0

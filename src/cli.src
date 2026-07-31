@@ -233,11 +233,11 @@ func cmd_torture(fs) {
 // MISLEADS rather than merely omits: this claimed "no fsync builtin yet" for
 // ten milestones after fsync shipped. scripts/guide_test.sh fails when a verb,
 // route or GRANGE_* variable exists in src/ but not in the guide.
-func grange_version() (v) { v = "0.13.2" }
+func grange_version() (v) { v = "0.13.3" }
 
 func cmd_guide() {
     s := ""
-    s = s + "{\"tool\":\"grange\",\"version\":\"0.13.2\",\"model\":\"document store: collections of minified-JSON docs keyed by id. A collection is HOT (whole data"
+    s = s + "{\"tool\":\"grange\",\"version\":\"0.13.3\",\"model\":\"document store: collections of minified-JSON docs keyed by id. A collection is HOT (whole data"
     s = s + "set in memory, the memtable IS the database) or COLD (disk-resident, hash-partitioned pages + run manifests; convert with POST /cold). Writes stage in"
     s = s + " memory and become durable at commit: one immutable checksummed WAL chunk per commit, fsynced before the write is acknowledged. Recovery replays the n"
     s = s + "ewest valid segment + its valid chunks; a torn last chunk is dropped, so a commit is all-or-nothing.\",\"loop\":[\"put --db d --doc '{...}' -> {id}\","
@@ -333,7 +333,7 @@ func cmd_guide() {
 
 func cmd_help_json() {
     s := ""
-    s = s + "{\"tool\":\"grange\",\"version\":\"0.13.2\",\"summary\":\"machin-native document database — agent-first, single binary, embeddable or served\",\"comma"
+    s = s + "{\"tool\":\"grange\",\"version\":\"0.13.3\",\"summary\":\"machin-native document database — agent-first, single binary, embeddable or served\",\"comma"
     s = s + "nds\":[{\"name\":\"put\",\"flags\":[\"--db\",\"--coll\",\"--id\",\"--doc\",\"--ttl\"],\"out\":\"{id}\"},{\"name\":\"get\",\"flags\":[\"--db\",\"--coll"
     s = s + "\",\"--id\"],\"out\":\"{id,doc}\"},{\"name\":\"del\",\"flags\":[\"--db\",\"--coll\",\"--id\"],\"out\":\"{id,deleted}\"},{\"name\":\"find\",\"flags\":["
     s = s + "\"--db\",\"--coll\",\"--where\",\"--limit\",\"--order\",\"--desc\",\"--after\",\"--fields\"],\"out\":\"{count,mode,scanned,pages,next,items}\"},{\"nam"
