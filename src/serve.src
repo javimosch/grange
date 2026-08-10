@@ -132,8 +132,18 @@ func srv_handle(req) (res) {
     // the telemetry collector (cli-telemetry-spec §3.4/§3.5). Public and
     // unauthenticated by necessity — a CLI in the wild carries no credential —
     // and therefore forgeable, which is why it stores a usage signal and must
-    // never be treated as an audit log. Nothing about the CONNECTION is read.
+    // never be treated as an audit log. The one thing read about the CONNECTION
+    // is the sender's IP, and only to feed an in-process, per-minute fair-use
+    // counter (tel_rl_check in collect.src) — never persisted, never joined
+    // with a stored event, dropped for free on the next watchdog restart. A
+    // sender posting on a timer (this route's contract explicitly forbids that)
+    // no longer reaches gr_open, which is what was letting one chatty sender
+    // drive the RSS watchdog many times more often than normal traffic does.
     if req.method == "POST" && srv_route(req.path, "/t") {
+        if tel_rl_check(client_ip(req)) == 1 {
+            res = srv_err("429 Too Many Requests", "rate-limited", "telemetry accepts at most " + str(tel_rl_limit()) + " events per 10s per sender (one per invocation is the contract); back off and retry")
+            return
+        }
         tok, twhy := tc_accept(g_srv_db, req)
         if tok == 0 {
             res = srv_err("400 Bad Request", "input", twhy)

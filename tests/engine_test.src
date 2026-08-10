@@ -304,5 +304,35 @@ func main() {
     assert_eq_str(ix_fstr(499.5), "499.5", "fstr fraction")
     assert_eq_str(ix_fstr(0.0 - 2.25), "-2.25", "fstr negative")
 
+    // hot_max_chunks: a HOT collection written to steadily (one commit per
+    // record, the /t telemetry shape) auto-compacts once it crosses the
+    // default 500-chunk threshold, instead of accumulating chunks forever.
+    // This is what a fresh reopen actually experiences after a long-running
+    // hot collection: g_replayed_chunks should stay small, not grow with
+    // total writes. The critical thing this proves is TERMINATION: if the
+    // hot branch in gr_commit() ever checked its retrigger condition before
+    // g_pend/g_pend_recs are reset (as an earlier version of this code did),
+    // gr_compact()'s internal gr_commit() call would see the still-pending
+    // write, write ANOTHER chunk, still be over threshold, and recurse until
+    // the stack overflows — so simply reaching test_summary() after this
+    // loop is itself part of what is being tested, not just the assertions.
+    ok, errmsg = gr_open(db, "hot")
+    assert(ok == 1, "open hot collection")
+    n := 0
+    while n < 520 {
+        gr_put("h" + str(n), "{\"n\":" + str(n) + "}")
+        assert(gr_commit() == 1, "hot commit " + str(n))
+        n = n + 1
+    }
+    assert_eq_int(gr_count(), 520, "hot: all 520 docs present pre-reopen")
+    assert(g_next_chunk < 500, "hot: auto-compact kept chunk count below the threshold, not 520")
+    ok, errmsg = gr_open(db, "hot")
+    assert_eq_int(gr_count(), 520, "hot: all 520 docs survive reopen after auto-compact")
+    assert(g_replayed_chunks < 500, "hot: reopen replays a small tail, not the full 520-write history")
+    doc, found = gr_get("h0")
+    assert_eq_str(doc, "{\"n\":0}", "hot: earliest doc survived auto-compact")
+    doc, found = gr_get("h519")
+    assert_eq_str(doc, "{\"n\":519}", "hot: latest doc survived auto-compact")
+
     test_summary()
 }

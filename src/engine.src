@@ -306,6 +306,25 @@ func gr_del(id) (existed) {
     g_pend_recs = g_pend_recs + 1
 }
 
+// hot_max_chunks bounds how many WAL chunks a HOT (non-cold) collection may
+// accumulate before a commit folds them into one fresh segment — the same
+// idea as cold_max_runs, generalised to the collection type that had no such
+// bound at all. A collection that is written to steadily forever (the
+// canonical case: _telemetry, public and unauthenticated, fed by every grange
+// install in the wild) grew to 1741 ~150-byte chunk files over eleven days
+// with nothing ever merging them, because gr_commit only ever checked g_cold.
+// Loading all 1741 on the FIRST /t of a fresh process (arena semantics: never
+// freed until the next restart) put a fresh boot within a couple of accepted
+// writes of the RSS watchdog's ceiling — so the watchdog fired every 15-30s
+// instead of its normal interval, which looked identical to a runaway sender
+// until the actual chunk count was checked. A manual `compact` fixed the
+// immediate case (1741 files, 6.9 MB -> 1 file, 104 KB, docs count unchanged);
+// this closes the gap so no hot collection needs a human to notice.
+func hot_max_chunks() (n) {
+    n = parse_int(env("GRANGE_HOT_MAX_CHUNKS"))
+    if n == 0 { n = 500 }
+}
+
 // gr_commit makes staged writes durable as one WAL chunk. Returns 1 on success.
 func gr_commit() (ok) {
     ok = 1
@@ -339,6 +358,19 @@ func gr_commit() (ok) {
         g_pend = []string{}
         g_pend_recs = 0
         g_pend_ops = []string{}
+        // hot auto-compact, checked LAST and only after g_pend is empty: this
+        // MUST run after the reset above, not alongside the cold branch. It
+        // recurses into gr_commit() (via gr_compact()) with g_pend_recs == 0,
+        // which is a true no-op — checked BEFORE the reset, the retrigger
+        // condition (g_next_chunk > threshold) never clears itself the way
+        // cold_threshold's does after cold_flush(), so gr_compact would call
+        // gr_commit would write another chunk would still be over threshold
+        // would call gr_compact again: unbounded recursion until the stack
+        // overflows. (Cold mode is safe here because cold_flush empties
+        // g_mem/g_tomb first, so ITS retrigger condition is already false by
+        // the time gr_compact's nested gr_commit re-checks it — a difference
+        // in the data the two conditions read, not a coincidence to copy.)
+        if g_cold == 0 && g_next_chunk > hot_max_chunks() { gr_compact() }
     }
 }
 
