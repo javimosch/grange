@@ -4,6 +4,20 @@
 
 grange is a document store written in pure [MFL](https://github.com/javimosch/machin) that pairs with machin apps the way SQLite pairs with C: embed the engine (`src/engine.src`) directly in your binary, or drive the standalone CLI. No server, no dependencies, no cgo — one ~75 KB static binary.
 
+## Quick start
+
+```sh
+# Self-hosted — one binary, no install
+curl -sSL -o grange https://github.com/javimosch/grange/releases/latest/download/grange-linux-x86_64
+chmod +x grange
+./grange put   --db ./data --coll notes --doc '{"title":"first","votes":3}'
+./grange index --db ./data --coll notes --field votes --range
+./grange find  --db ./data --coll notes --order votes --desc --limit 5
+
+# Or hosted — skip the install, signup is one curl
+curl -s https://grange.intrane.fr/llms.txt   # the full API contract, written for agents
+```
+
 - **Agent-first**: JSON-only stdout, typed errors on stderr, semantic exit codes (80–119), `guide` + `help-json` introspection, per [cli-specs](https://cli-specs.intrane.fr/). No human UI, ever.
 - **Crash-safe**: every commit is one immutable, checksummed WAL chunk. `kill -9` at any moment leaves exactly the committed prefix — proven by `make crash` (5 rounds of mid-flight SIGKILL, recovered counts are exact commit-batch multiples).
 - **Faster than SQLite on every indexed workload** (100k docs, `make bench`, both engines indexed on the same field, same box):
