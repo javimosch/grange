@@ -110,6 +110,7 @@ crash: build
 	./scripts/crash_cold_test.sh ./$(BIN) 3
 
 fuzz: build
+	./scripts/fuzz_json_test.sh ./$(BIN)
 	./scripts/fuzz_cold.sh 1200 6
 	python3 scripts/fuzz_replica.py 150 3
 
