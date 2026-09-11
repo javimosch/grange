@@ -1,0 +1,142 @@
+// daemon.src — cli-daemon-spec lifecycle wrapper for grange.
+//
+// PROTOCOL.md §4: `grange daemon start|stop|status` built on §1-§3 (the serve
+// command, GET /_health, POST /_shutdown). Idempotent: start on an already-
+// running daemon and stop on an already-stopped one are both successes.
+//
+// start detaches a serve child with fork/setsid and redirects its stdio to a
+// log file (so it neither holds the caller's pipes open nor prints into the
+// caller's stdout), then polls /_health rather than sleeping a fixed amount.
+// stop posts /_shutdown and polls until the port goes away. status probes
+// /_health and exits 0 (running) or 3 (stopped).
+
+// fcntl.h open() flags used by the detach redirect (Linux/glibc values).
+var D_O_RDONLY = 0
+var D_O_WRONLY = 1
+var D_O_CREAT = 64
+var D_O_TRUNC = 512
+
+func pid_path() (p) {
+    p = "/tmp/grange.pid"
+}
+
+func daemon_log_path() (p) {
+    p = env("HOME") + "/.grange/daemon.log"
+}
+
+func shutdown_token_path() (p) {
+    p = env("HOME") + "/.grange/shutdown.token"
+}
+
+// health_probe does a bounded GET /_health and returns 1 if the daemon answered
+// 200, 0 otherwise (down, wrong service, or unreachable).
+func health_probe(host, port) (up) {
+    up = 0
+    url := "http://" + host + ":" + str(port) + "/_health"
+    status, body, herr := http_request("GET", url, []string{}, "")
+    _ = body
+    if len(herr) == 0 {
+        if status == 200 { up = 1 }
+    }
+}
+
+// wait_health polls /_health until it answers 200 or the timeout elapses.
+func wait_health(host, port, timeout_ms) (ok) {
+    ok = 0
+    elapsed := 0
+    while elapsed < timeout_ms {
+        if health_probe(host, port) == 1 { ok = 1  return }
+        sleep(100)
+        elapsed = elapsed + 100
+    }
+}
+
+// wait_gone polls /_health until it stops answering 200 or the timeout elapses.
+func wait_gone(host, port, timeout_ms) (ok) {
+    ok = 0
+    elapsed := 0
+    while elapsed < timeout_ms {
+        if health_probe(host, port) == 0 { ok = 1  return }
+        sleep(100)
+        elapsed = elapsed + 100
+    }
+}
+
+// serve_flags builds a minimal flag set for the detached serve child. cmd_serve
+// reads only these flags; db is left empty so cmd_serve applies its own default
+// (a per-port temp database), and the child becomes a normal foreground serve
+// loop once stdio is redirected to the log.
+func serve_flags(host, port) (fs) {
+    fs = new_flags("grange")
+    fs.val["host"] = host
+    fs.val["port"] = str(port)
+    fs.val["coll"] = "default"
+    fs.val["token"] = ""
+    fs.val["follow"] = "false"
+    fs.val["read-proxy"] = ""
+}
+
+// start_daemon launches a detached serve child bound to host:port. Idempotent:
+// if /_health already answers, it reports already_running and exits 0 without
+// spawning a second process.
+func start_daemon(host, port) {
+    if health_probe(host, port) == 1 {
+        emit_ok("{\"daemon\":\"already_running\",\"host\":\"" + host + "\",\"port\":" + str(port) + "}")
+        exit(0)
+    }
+    mkdir(env("HOME") + "/.grange")
+    log := daemon_log_path()
+    pid := fork()
+    if pid == 0 {
+        // CHILD: detach, redirect stdio to the log, become the serve loop.
+        setsid()
+        lf := open(log, D_O_WRONLY | D_O_CREAT | D_O_TRUNC, 420)
+        if lf >= 0 {
+            dup2(lf, 1)
+            dup2(lf, 2)
+        }
+        dn := open("/dev/null", D_O_RDONLY, 0)
+        if dn >= 0 { dup2(dn, 0) }
+        fs := serve_flags(host, port)
+        cmd_serve(fs)
+        exit(0)
+    }
+    // PARENT: poll health, then report.
+    if wait_health(host, port, 5000) == 1 {
+        emit_ok("{\"daemon\":\"started\",\"host\":\"" + host + "\",\"port\":" + str(port) + ",\"log\":\"" + jesc(log) + "\"}")
+        exit(0)
+    }
+    emit_err(100, "daemon_start_failed", "daemon did not become healthy within 5s (see " + log + ")", 0, "cat " + log)
+}
+
+// stop_daemon posts /_shutdown and polls until the port goes away. Idempotent:
+// if /_health is already unreachable, it reports already_stopped and exits 0.
+func stop_daemon(host, port) {
+    if health_probe(host, port) == 0 {
+        emit_ok("{\"daemon\":\"already_stopped\"}")
+        exit(0)
+    }
+    base := "http://" + host + ":" + str(port)
+    hdrs := []string{}
+    tok := trim(read_file(shutdown_token_path()))
+    if len(tok) > 0 { hdrs = []string{"Authorization: Bearer " + tok} }
+    scode, sbody, serr := http_request("POST", base + "/_shutdown", hdrs, "")
+    _ = scode
+    _ = sbody
+    _ = serr
+    if wait_gone(host, port, 5000) == 1 {
+        emit_ok("{\"daemon\":\"stopped\"}")
+        exit(0)
+    }
+    emit_err(110, "daemon_stop_failed", "daemon still responding after shutdown grace period", 0, "grange daemon status --port " + str(port))
+}
+
+// daemon_status probes /_health and exits 0 (running) or 3 (stopped).
+func daemon_status(host, port) {
+    if health_probe(host, port) == 1 {
+        emit_ok("{\"daemon\":\"running\",\"host\":\"" + host + "\",\"port\":" + str(port) + "}")
+        exit(0)
+    }
+    emit_ok("{\"daemon\":\"stopped\",\"host\":\"" + host + "\",\"port\":" + str(port) + "}")
+    exit(3)
+}

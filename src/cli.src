@@ -237,7 +237,8 @@ func grange_version() (v) { v = "0.13.3" }
 
 func cmd_guide() {
     s := ""
-    s = s + "{\"tool\":\"grange\",\"version\":\"0.13.3\",\"model\":\"document store: collections of minified-JSON docs keyed by id. A collection is HOT (whole data"
+    s = s + "{\"version\":\"" + grange_version() + "\",\"one_liner\":\"Machin-native document database — agent-first, single binary, embeddable or served.\","
+    s = s + "\"tool\":\"grange\",\"model\":\"document store: collections of minified-JSON docs keyed by id. A collection is HOT (whole data"
     s = s + "set in memory, the memtable IS the database) or COLD (disk-resident, hash-partitioned pages + run manifests; convert with POST /cold). Writes stage in"
     s = s + " memory and become durable at commit: one immutable checksummed WAL chunk per commit, fsynced before the write is acknowledged. Recovery replays the n"
     s = s + "ewest valid segment + its valid chunks; a torn last chunk is dropped, so a commit is all-or-nothing.\",\"loop\":[\"put --db d --doc '{...}' -> {id}\","
@@ -330,7 +331,11 @@ func cmd_guide() {
     s = s + ",\"gr_reset()/arena reset invalidates values the caller still holds, not just grange's internals\"],\"exit_codes\":{\"0\":\"ok\",\"80-89\":\"input\","
     s = s + "\"90-99\":\"not found\",\"92\":\"verify found corruption\",\"110-119\":\"internal\"},\"hosted\":{\"url\":\"https://grange.intrane.fr\",\"signup\":\"PO"
     s = s + "ST /tenants with X-Peage-Wallet: pw_... -> isolated metered namespace + gt_ token\",\"pricing\":\"pay-as-you-go storage, 15 cents/GB/month above 50MB "
-    s = s + "free, billed via peage (https://peage.intrane.fr/llms.txt)\"}}"
+    s = s + "free, billed via peage (https://peage.intrane.fr/llms.txt)\"},"
+    s = s + "\"concepts\":{\"hot\":\"Whole dataset in memory, the memtable IS the database\",\"cold\":\"Disk-resident, hash-partitioned pages + run manifests; convert with POST /cold\",\"wal\":\"One immutable checksummed WAL chunk per commit, fsynced before ack\",\"commit\":\"All-or-nothing — a torn last chunk is dropped on recovery\",\"index_eq\":\"Equality index: O(1) count/agg registers per value\",\"index_range\":\"Sorted projection: ranges, ordering, cursors\"},"
+    s = s + "\"commands\":{\"help-json\":\"Print the machine-readable command catalog\",\"guide\":\"Print this agent guide\",\"version\":\"Print version info\",\"put\":\"Insert a document\",\"get\":\"Fetch a document\",\"del\":\"Delete a document\",\"find\":\"Query with filters/ordering\",\"count\":\"Count matching docs\",\"agg\":\"Group-by aggregation\",\"index\":\"Create an index\",\"compact\":\"Fold WAL into a segment\",\"serve\":\"Run the HTTP server\",\"verify\":\"Walk every file, exit 92 if corrupt\"},"
+    s = s + "\"examples\":[\"grange put --db d --doc '{\\\"name\\\":\\\"test\\\"}'\",\"grange get --db d --id <id>\",\"grange find --db d --where status=active --limit 50\",\"grange count --db d --where status=active\",\"grange compact --db d\",\"grange serve --db d --port 8801\"],"
+    s = s + "\"gotchas\":[\"--doc must be single-line minified JSON (no raw newlines)\",\"--order needs a --range index on the field\",\"compact folds WAL chunks into a segment; run when stats.chunks_replayed grows\",\"verify exits 92 if anything is wrong — run after crashes\",\"cold collections do not support TTL docs\"]}"
     println(s)
 }
 
@@ -350,7 +355,7 @@ func cmd_help_json() {
     s = s + "ken\",\"--follow\",\"--read-proxy\"],\"out\":\"HTTP server\"},{\"name\":\"follow\",\"flags\":[\"--from\",\"--rtoken\",\"--remote-db\",\"--remote-coll\",\"--db\",\"--co"
     s = s + "ll\",\"--once\"],\"out\":\"replication into a local db\"},{\"name\":\"bench\",\"flags\":[\"--db\",\"--n\",\"--vs-sqlite\"],\"out\":\"benchmark metrics"
     s = s + "\"},{\"name\":\"torture\",\"flags\":[\"--db\",\"--n\",\"--batch\",\"--cold\"],\"out\":\"crash-test writer\"},{\"name\":\"guide\",\"flags\":[],\"out\":"
-    s = s + "\"feature catalog\"},{\"name\":\"help-json\",\"flags\":[],\"out\":\"this command list\"}]}"
+    s = s + "\"feature catalog\"},{\"name\":\"help-json\",\"flags\":[],\"out\":\"this command list\"},{\"name\":\"version\",\"flags\":[],\"out\":\"version info\"}],\"exit_codes\":{\"0\":\"ok\",\"80-89\":\"input\",\"90-99\":\"not found\",\"92\":\"verify found corruption\",\"110-119\":\"internal\"}}"
     println(s)
 }
 
@@ -382,6 +387,7 @@ func main() {
     fs = flag_str(fs, "sums", "s", "", "index: comma-separated numeric fields to keep sum registers for")
     fs = flag_str(fs, "group-by", "g", "", "agg: field to group by")
     fs = flag_int(fs, "port", "p", "4444", "serve: HTTP port")
+    fs = flag_str(fs, "host", "", "127.0.0.1", "serve/daemon: bind address (default 127.0.0.1, loopback only)")
     fs = flag_str(fs, "token", "t", "", "serve: bearer token (default GRANGE_TOKEN or generated)")
     fs = flag_str(fs, "read-proxy", "", "", "serve: proxy data GETs to a --follow replica (default GRANGE_READ_PROXY)")
     fs = flag_str(fs, "sum", "u", "", "agg: comma-separated numeric fields to sum/avg")
@@ -437,10 +443,35 @@ func cli_dispatch(fs, verb) {
         return
     }
     if verb == "serve" { tel_report("serve", 0)  cmd_serve(fs)  return }
+    if verb == "daemon" {
+        rest := flag_args(fs)
+        sub := ""
+        if len(rest) > 1 { sub = rest[1] }
+        port := flag_int_val(fs, "port")
+        if port == 0 { port = 4444 }
+        host := flag_get(fs, "host")
+        if len(host) == 0 { host = "127.0.0.1" }
+        if sub == "start" { start_daemon(host, port)  return }
+        if sub == "stop" { stop_daemon(host, port)  return }
+        if sub == "status" { daemon_status(host, port)  return }
+        emit_err(80, "input", "daemon needs start|stop|status", 1, "grange daemon start --port 4444")
+    }
     if verb == "follow" { cmd_follow(fs)  return }
     if verb == "bench" { cmd_bench(fs)  return }
     if verb == "torture" { cmd_torture(fs)  return }
     if verb == "guide" { cmd_guide()  return }
     if verb == "help-json" { cmd_help_json()  return }
-    emit_err(80, "input", "unknown verb: " + verb, 1, "run: grange help-json")
+    if verb == "version" || verb == "--version" || verb == "-v" {
+        json_flag := false
+        i := 0
+        raw := args()
+        for i < len(raw) { if raw[i] == "--json" { json_flag = true } i = i + 1 }
+        if json_flag {
+            println("{\"name\":\"grange\",\"version\":\"" + grange_version() + "\"}")
+        } else {
+            println(grange_version())
+        }
+        return
+    }
+    emit_err(85, "invalid_argument", "unknown verb: " + verb, 1, "run: grange help-json")
 }

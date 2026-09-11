@@ -1,0 +1,24 @@
+// sys.src — FFI declarations for daemon lifecycle (cli-daemon-spec).
+//
+// machin has no builtins for fork/setsid/getpid/dup2/open/kill, so we declare
+// the handful of POSIX syscalls the daemon wrapper needs against libc. These
+// are all in libc (always linked), so no cflags/-l is required. getpid() is
+// used by /_health (cli-daemon-spec §2: the body carries the pid); the rest
+// detach a background serve process (§4 start) and reap it (§5 PID variant).
+
+extern "unistd" {
+    header "unistd.h"
+    fn fork() i32
+    fn setsid() i32
+    fn getpid() i32
+    fn unlink(string) i32
+    fn dup2(i32, i32) i32
+}
+extern "fcntl" {
+    header "fcntl.h"
+    fn open(string, i32, i32) i32
+}
+extern "signal" {
+    header "signal.h"
+    fn kill(i32, i32) i32
+}

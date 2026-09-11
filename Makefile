@@ -6,7 +6,7 @@
 export DO_NOT_TRACK = 1
 
 BIN = grange
-SRCS = framework/flags.src framework/machweb.src src/recfile.src src/engine.src src/registry.src src/cold.src src/coldbulk.src src/coldindex.src src/coldquery.src src/coldrange.src src/coldsort.src src/index.src src/range.src src/qcost.src src/project.src src/query.src src/order.src src/verify.src src/ready.src src/watch.src src/telemetry.src src/collect.src src/bench.src src/tenant.src src/landing.src src/servemeta.src src/servebulk.src src/serveread.src src/serveproxy.src src/servereset.src src/serve.src src/cli.src
+SRCS = framework/flags.src framework/machweb.src src/sys.src src/recfile.src src/engine.src src/registry.src src/cold.src src/coldbulk.src src/coldindex.src src/coldquery.src src/coldrange.src src/coldsort.src src/index.src src/range.src src/qcost.src src/project.src src/query.src src/order.src src/verify.src src/ready.src src/watch.src src/telemetry.src src/collect.src src/bench.src src/tenant.src src/landing.src src/servemeta.src src/servebulk.src src/serveread.src src/serveproxy.src src/servereset.src src/serve.src src/daemon.src src/cli.src
 
 build:
 	machin encode $(SRCS) > $(BIN).mfl

@@ -17,7 +17,7 @@ func emit_ok(dataJson) {
 func emit_err(code, etype, msg, recoverable, suggestion) {
     rec := "false"
     if recoverable == 1 { rec = "true" }
-    write(2, "{\"ok\":false,\"error\":{\"type\":\"" + etype + "\",\"message\":\"" + jesc(msg) + "\",\"recoverable\":" + rec + ",\"suggestions\":[\"" + jesc(suggestion) + "\"]}}\n")
+    println("{\"error\":{\"code\":" + str(code) + ",\"type\":\"" + etype + "\",\"message\":\"" + jesc(msg) + "\",\"recoverable\":" + rec + ",\"suggestions\":[\"" + jesc(suggestion) + "\"]}}")
     exit(code)
 }
 

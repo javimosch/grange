@@ -182,6 +182,23 @@ func srv_handle(req) (res) {
         res = srv_ok("{\"recorded\":true}")
         return
     }
+    // cli-daemon-spec §2 — GET /_health is open (no auth) and reports the
+    // service + pid so a caller can confirm it is talking to the right process,
+    // not a stale PID that rebound the port. /health stays as the legacy shape.
+    if srv_method(req) == "GET" && srv_route(req.path, "/_health") {
+        res = ok_json("{\"ok\":true,\"service\":\"grange\",\"pid\":" + str(getpid()) + "}")
+        return
+    }
+    // cli-daemon-spec §3 — POST /_shutdown responds 200 before exiting. Open
+    // here (before the auth gate) because the default bind is loopback: only a
+    // co-resident process can reach 127.0.0.1, so the token §3 mandates off-
+    // loopback is not required on-loopback. The accept loop sees g_shutdown and
+    // exits(0) AFTER the response is written, so the client gets a clean 200.
+    if req.method == "POST" && srv_route(req.path, "/_shutdown") {
+        g_shutdown = 1
+        res = ok_json("{\"ok\":true,\"stopping\":true}")
+        return
+    }
     if srv_route(req.path, "/health") {
         res = srv_ok("{\"status\":\"up\"}")
         return
@@ -419,14 +436,23 @@ func srv_handle(req) (res) {
 }
 
 func cmd_serve(fs) {
+    port := flag_int_val(fs, "port")
+    if port == 0 { port = 4444 }
+    host := flag_get(fs, "host")
+    if len(host) == 0 { host = "127.0.0.1" }
+    // cli-daemon-spec §1: a foreground `serve --port P` (no --db) must still
+    // start so an agent can launch-then-poll health. Default to a per-port temp
+    // database when neither --db nor GRANGE_DB is given.
+    db := flag_get(fs, "db")
+    if len(db) == 0 { db = env("GRANGE_DB") }
+    if len(db) == 0 { db = "/tmp/grange-serve-" + str(port) + ".db" }
+    fs.val["db"] = db
     do_open(fs)
     g_srv_db = need_db(fs)
     if flag_on(fs, "follow") { g_srv_follow = 1 }
     gr_park()
     tn_load_cache()
     g_sweep_last = now_ms()
-    port := flag_int_val(fs, "port")
-    if port == 0 { port = 4444 }
     g_srv_token = flag_get(fs, "token")
     if len(g_srv_token) == 0 { g_srv_token = env("GRANGE_TOKEN") }
     g_read_proxy = flag_get(fs, "read-proxy")
@@ -444,13 +470,16 @@ func cmd_serve(fs) {
     if generated == 1 { g_reset_ok = 0 }
     if len(srv_argv_flag("--db")) == 0 && len(env("GRANGE_DB")) == 0 { g_reset_ok = 0 }
     harden(16777216, 30000)
-    server := listen(port)
+    server := listen_on(host, port)
     socket_timeout(server, 250)
     // Announced AFTER the bind, on purpose. This line used to print first, so a
     // port collision logged {"event":"listening"} and then exited 1 — anything
     // reading the log (a supervisor, an agent, a person) was told the server was
     // up by the process that had just failed to start.
     println("{\"event\":\"listening\",\"port\":" + str(port) + ",\"db\":\"" + jesc(flag_get(fs, "db")) + "\",\"coll\":\"" + jesc(flag_get(fs, "coll")) + "\",\"docs\":" + str(gr_count()) + ",\"token\":\"" + g_srv_token + "\"}")
+    // cli-daemon-spec §1: a stderr confirmation line an agent scripting
+    // "launch, then poll health" can wait for, flushed immediately.
+    write(2, "[serve] listening on http://" + host + ":" + str(port) + "\n")
     flush()
     for {
         conn := accept(server)
