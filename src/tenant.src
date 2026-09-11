@@ -27,11 +27,10 @@ func tn_rate_limit() (n) {
 }
 
 // tn_admin_rate_limit is the per-minute cap for the admin token.
-// Higher than the tenant cap (admin runs the landing page, subscribe form,
-// and operational queries). Configurable via GRANGE_ADMIN_RATE_PER_MIN.
+// Default 0 = disabled (no admin rate limiting). Set GRANGE_ADMIN_RATE_PER_MIN
+// to a positive value to enable (e.g. 600 for the hosted instance).
 func tn_admin_rate_limit() (n) {
     n = parse_int(env("GRANGE_ADMIN_RATE_PER_MIN"))
-    if n == 0 { n = 600 }
 }
 
 // tn_rl_check counts one request for the tenant; returns 1 if over the cap.

@@ -87,24 +87,24 @@ curl -s -X POST "http://localhost:$PORT/shutdown" -H "Authorization: Bearer $TOK
 sleep 0.3; kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
 rm -rf "$DB"
 
-# --- Part 3: admin not limited when env is unset (default 600) ---
+# --- Part 3: admin not limited when env is unset (disabled by default) ---
 DB=$(mktemp -d /tmp/grange-rl-default-XXXX)
 fuser -k "$PORT/tcp" 2>/dev/null; sleep 0.3
 "$BIN" serve --db "$DB" --port "$PORT" --token "$TOK" >/dev/null 2>&1 &
 SRV=$!
 for _ in $(seq 1 50); do sleep 0.1; curl -sf "http://localhost:$PORT/health" >/dev/null 2>&1 && break; done
 
-# send 10 requests — should all succeed (default 600/min)
+# send 20 requests — should all succeed (admin rate limiting is off by default)
 ok_count=0
-for i in $(seq 1 10); do
+for i in $(seq 1 20); do
   CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PORT/stats?coll=default" -H "Authorization: Bearer $TOK" 2>&1)
   if [ "$CODE" = "200" ]; then ok_count=$((ok_count + 1)); fi
 done
 
-if [ "$ok_count" -eq 10 ]; then
-  echo "  ok   admin token not limited at 10 requests (default 600/min)"
+if [ "$ok_count" -eq 20 ]; then
+  echo "  ok   admin token not limited by default (20/20 ok, disabled unless GRANGE_ADMIN_RATE_PER_MIN is set)"
 else
-  echo "  FAIL admin rate limit too aggressive at default: $ok_count/10 ok"
+  echo "  FAIL admin rate limit active at default: $ok_count/20 ok"
   fails=$((fails + 1))
 fi
 

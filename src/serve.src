@@ -209,9 +209,11 @@ func srv_handle(req) (res) {
         }
     }
     if role == "admin" {
-        if tn_rl_check("__admin") == 1 {
-            res = srv_err("429 Too Many Requests", "rate-limited", "admin cap: " + str(tn_admin_rate_limit()) + " requests/min; retry_after_seconds=" + str(tn_rl_retry_after("__admin")))
-            return
+        if tn_admin_rate_limit() > 0 {
+            if tn_rl_check("__admin") == 1 {
+                res = srv_err("429 Too Many Requests", "rate-limited", "admin cap: " + str(tn_admin_rate_limit()) + " requests/min; retry_after_seconds=" + str(tn_rl_retry_after("__admin")))
+                return
+            }
         }
     }
     if g_srv_follow == 0 { tn_sweep() }
