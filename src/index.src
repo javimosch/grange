@@ -155,11 +155,26 @@ func ix_save() (ok) {
     if write_file(gr_dir() + "/fields.idx", join(lines, "\n") + "\n") < 0 { ok = 0 }
 }
 
+// ix_maybe_reload checks whether fields.idx has changed since the last load
+// and reloads + rebuilds if so.  Called by gr_refresh on followers so they
+// see index declarations made on the primary (fields.idx is written directly,
+// not through the WAL, so WAL replay alone misses new indexes).
+var g_fields_idx_content = ""
+func ix_maybe_reload() {
+    content := read_file(gr_dir() + "/fields.idx")
+    if content != g_fields_idx_content {
+        g_fields_idx_content = content
+        ix_load()
+        ix_rebuild()
+    }
+}
+
 func ix_load() {
     g_ifields = []string{}
     g_isums = make(map[string]string)
     g_ikind = make(map[string]string)
     content := read_file(gr_dir() + "/fields.idx")
+    g_fields_idx_content = content
     if len(content) == 0 { return }
     lines := split(content, "\n")
     i := 0

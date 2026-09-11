@@ -332,6 +332,9 @@ func gr_reset() (ok) {
 // (someone compacted): full reopen. Returns records applied (-1 = reopened).
 func gr_refresh() (applied) {
     applied = 0
+    // index declarations are written to fields.idx directly (not through the
+    // WAL), so WAL replay alone misses new indexes declared on the primary.
+    ix_maybe_reload()
     // A follower's data changes when the primary's files change, and that does
     // NOT go through this process's commit path — so g_seq, which the cold
     // count cache keys on, may not move. Invalidate explicitly: a stale count
