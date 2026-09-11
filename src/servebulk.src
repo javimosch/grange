@@ -113,7 +113,7 @@ func srv_bulk_route(req) (res, handled) {
             i = i + 1
         }
         if gr_commit() == 0 {
-            res = srv_err("500 Internal Server Error", "internal", "wal chunk write failed")
+            res = srv_err("507 Insufficient Storage", "disk-full", "disk full or write error")
             return
         }
         res = srv_ok("{\"ops\":" + str(nops) + ",\"ids\":[" + join(ids, ",") + "]}")

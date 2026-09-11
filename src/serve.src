@@ -247,7 +247,7 @@ func srv_handle(req) (res) {
         }
         gr_put(id, doc)
         if gr_commit() == 0 {
-            res = srv_err("500 Internal Server Error", "internal", "wal chunk write failed")
+            res = srv_err("507 Insufficient Storage", "disk-full", "disk full or write error")
             return
         }
         res = srv_ok("{\"id\":\"" + jesc(id) + "\"}")
@@ -277,7 +277,7 @@ func srv_handle(req) (res) {
             return
         }
         if gr_commit() == 0 {
-            res = srv_err("500 Internal Server Error", "internal", "wal chunk write failed")
+            res = srv_err("507 Insufficient Storage", "disk-full", "disk full or write error")
             return
         }
         res = srv_ok("{\"id\":\"" + jesc(id) + "\",\"deleted\":true}")

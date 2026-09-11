@@ -110,7 +110,7 @@ func cmd_put(fs) {
     do_open(fs)
     if g_cold == 1 && ttl > 0 { emit_err(82, "input", "cold collections do not support TTL docs", 1, "omit --ttl or use a hot collection") }
     gr_put(id, doc)
-    if gr_commit() == 0 { emit_err(111, "internal", "wal chunk write failed", 0, "check disk space and permissions") }
+    if gr_commit() == 0 { emit_err(90, "disk-full", "disk full or write error", 0, "check disk space and permissions") }
     emit_ok("{\"id\":\"" + jesc(id) + "\"}")
 }
 
@@ -129,7 +129,7 @@ func cmd_del(fs) {
     do_open(fs)
     existed := gr_del(id)
     if existed == 0 { emit_err(90, "not-found", "no document with id " + id, 1, "nothing to delete") }
-    if gr_commit() == 0 { emit_err(111, "internal", "wal chunk write failed", 0, "check disk space and permissions") }
+    if gr_commit() == 0 { emit_err(90, "disk-full", "disk full or write error", 0, "check disk space and permissions") }
     emit_ok("{\"id\":\"" + jesc(id) + "\",\"deleted\":true}")
 }
 
@@ -214,7 +214,7 @@ func cmd_torture(fs) {
     while i < n {
         gr_put("t" + str(i), "{\"i\":" + str(i) + ",\"grp\":\"g" + str(i % 7) + "\"}")
         if (i + 1) % batch == 0 {
-            if gr_commit() == 0 { emit_err(111, "internal", "wal write failed", 0, "disk") }
+            if gr_commit() == 0 { emit_err(90, "disk-full", "disk full or write error", 0, "check disk space") }
             // exercise the cold paths a crash must survive: flush every 4th
             // batch, compact every 20th
             if g_cold == 1 {
