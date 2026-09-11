@@ -151,8 +151,11 @@ func ix_save() (ok) {
         lines = append(lines, ln)
         i = i + 1
     }
+    body := join(lines, "\n")
+    if len(lines) > 0 { body = body + "\n" }
+    full := body + "#|" + gr_chk(body) + "\n"
     ok = 1
-    if write_file(gr_dir() + "/fields.idx", join(lines, "\n") + "\n") < 0 { ok = 0 }
+    if write_file(gr_dir() + "/fields.idx", full) < 0 { ok = 0 }
 }
 
 // ix_maybe_reload checks whether fields.idx has changed since the last load
@@ -176,10 +179,39 @@ func ix_load() {
     content := read_file(gr_dir() + "/fields.idx")
     g_fields_idx_content = content
     if len(content) == 0 { return }
-    lines := split(content, "\n")
+    raw := split(content, "\n")
+    m := len(raw)
+    if m > 0 && raw[m-1] == "" { m = m - 1 }
+    if m < 1 { return }
+    // checksum trailer: last line is "#|<sha12>". Validate and strip it.
+    // If the trailer is missing (old format), load all lines as declarations.
+    trailer := raw[m-1]
+    decl_lines := raw
+    decl_count := m
+    if has_prefix(trailer, "#|") && len(trailer) == 14 {
+        body := ""
+        if m > 1 {
+            i := 0
+            while i < m - 1 {
+                body = body + raw[i]
+                if i < m - 2 { body = body + "\n" }
+                i = i + 1
+            }
+            body = body + "\n"
+        }
+        if gr_chk(body) != substr(trailer, 2, len(trailer)) {
+            // checksum mismatch — index file is corrupt.  Discard declarations
+            // and continue without indexes (queries fall back to scans).  The
+            // operator can re-declare indexes with `grange index`.
+            write(2, "{\"event\":\"index_corrupt\",\"file\":\"fields.idx\",\"action\":\"discard_and_continue\",\"ts\":" + str(now_ms()) + "}\n")
+            return
+        }
+        decl_lines = raw
+        decl_count = m - 1
+    }
     i := 0
-    while i < len(lines) {
-        ln := lines[i]
+    while i < decl_count {
+        ln := decl_lines[i]
         if len(ln) > 0 {
             parts := split(ln, "\t")
             f := parts[0]
