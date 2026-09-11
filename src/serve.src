@@ -76,6 +76,36 @@ func srv_route(p, r) (yes) {
     if has_prefix(p, r + "?") { yes = true }
 }
 
+// srv_valid_param validates a query parameter for injection prevention.
+// Rejects newlines, tabs, null bytes, and other control characters that could
+// break the record format or the JSON path lookup. Enforces a max length to
+// prevent memory exhaustion. Returns 1 if safe, 0 if rejected.
+func srv_valid_param(s) (ok) {
+    ok = 0
+    if len(s) > 10000 { return }
+    if contains(s, "\n") { return }
+    if contains(s, "\t") { return }
+    ok = 1
+}
+
+// srv_check_params validates multiple query params at once. Returns 1 if all
+// safe, 0 if any is rejected. Pass param names as a comma-separated string.
+func srv_check_params(req, names) (ok) {
+    ok = 1
+    parts := split(names, ",")
+    i := 0
+    while i < len(parts) {
+        v := query(req, parts[i])
+        if len(v) > 0 {
+            if srv_valid_param(v) == 0 {
+                ok = 0
+                return
+            }
+        }
+        i = i + 1
+    }
+}
+
 func srv_body_field(req, f) (tok) {
     tok = ""
     v, err := json_get(req.body, "." + f)
@@ -290,6 +320,10 @@ func srv_handle(req) (res) {
         return
     }
     if srv_method(req) == "GET" && srv_route(req.path, "/find") {
+        if srv_check_params(req, "where,order,fields,after,desc") == 0 {
+            res = srv_err("400 Bad Request", "input", "query parameter contains invalid characters or is too long (max 10KB)")
+            return
+        }
         limit := parse_int(query(req, "limit"))
         if limit == 0 { limit = 100 }
         wh := query(req, "where")

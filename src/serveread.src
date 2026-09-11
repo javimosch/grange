@@ -54,6 +54,10 @@ func srv_tail_routes(req) (res, handled) {
         return
     }
     if srv_method(req) == "GET" && srv_route(req.path, "/count") {
+        if srv_check_params(req, "where") == 0 {
+            res = srv_err("400 Bad Request", "input", "query parameter contains invalid characters or is too long (max 10KB)")
+            return
+        }
         wh := query(req, "where")
         q_warm(wh)
         body := ""
@@ -66,6 +70,10 @@ func srv_tail_routes(req) (res, handled) {
         return
     }
     if srv_method(req) == "GET" && srv_route(req.path, "/agg") {
+        if srv_check_params(req, "group-by,sum,minmax") == 0 {
+            res = srv_err("400 Bad Request", "input", "query parameter contains invalid characters or is too long (max 10KB)")
+            return
+        }
         f := query(req, "group-by")
         if len(f) == 0 {
             res = srv_err("400 Bad Request", "input", "missing group-by query param")
