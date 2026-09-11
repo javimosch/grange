@@ -99,5 +99,6 @@ func landing_html() (h) {
         "<h2>the interface is the docs</h2>" +
         "<pre>curl -s https://grange.intrane.fr/llms.txt   # the full contract, written for agents</pre>" +
         "<footer>grange is a single static binary written in <a href=\"https://github.com/javimosch/machin\">machin (MFL)</a>. An <a href=\"https://intrane.fr\">intrane.fr</a> experiment. Storage billed via <a href=\"https://peage.intrane.fr\">peage</a>. · <a href=\"https://github.com/javimosch/grange\">source</a> · <a href=\"https://status.dev.intrane.fr/g/grange\">status</a> · Contact: javi@intrane.fr</footer>" +
+        "<script src=\"https://chatsnip.intrane.fr/w.js\" data-agent=\"pk_d72f593842d953d3f037d842\" defer></script>" +
         "</main></body></html>"
 }
