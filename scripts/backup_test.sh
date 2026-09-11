@@ -84,6 +84,31 @@ d=json.load(sys.stdin)["data"]
 print(sum(1 for i in d["items"] if not isinstance(i.get("doc"),dict) or "v" not in i["doc"]))' 2>/dev/null || echo -1)
 [ "$BAD" = "0" ] && check "every restored document is whole" 1 || check "every restored document is whole ($BAD malformed)" 0
 
+# 2b. full data comparison: every restored document must match the source
+#     byte-for-byte (not just count — field values must agree)
+MISMATCH=$("$BIN" find --db "$REST/db" --coll c --limit 100000 2>/dev/null | python3 -c '
+import json,sys,subprocess
+restored = json.load(sys.stdin)["data"]["items"]
+# get the source documents via the running server
+src = subprocess.run(["curl","-s","http://localhost:'"$PORT"'/find?coll=c&limit=100000","-H","'"$A"'"], capture_output=True, text=True).stdout
+src_docs = {}
+try:
+    for item in json.loads(src)["data"]["items"]:
+        src_docs[item["id"]] = item["doc"]
+except: pass
+mismatches = 0
+for item in restored:
+    rid = item["id"]
+    rdoc = item["doc"]
+    if rid not in src_docs:
+        mismatches += 1
+    elif json.dumps(src_docs[rid], sort_keys=True) != json.dumps(rdoc, sort_keys=True):
+        mismatches += 1
+print(mismatches)
+' 2>/dev/null || echo -1)
+[ "$MISMATCH" = "0" ] && check "every restored document matches source byte-for-byte" 1 \
+  || check "every restored document matches source byte-for-byte ($MISMATCH mismatches)" 0
+
 # 3. a restored database is writable
 "$BIN" put --db "$REST/db" --coll c --id afterrestore --doc '{"v":999}' >/dev/null 2>&1
 AFTER=$("$BIN" get --db "$REST/db" --coll c --id afterrestore 2>/dev/null | grep -c '"v"' || true)
