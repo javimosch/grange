@@ -15,6 +15,13 @@
 # a fresh machine and machin's mkdir is one level), and the collector's counter
 # never incremented while reporting success.
 set -u
+# The Makefile exports DO_NOT_TRACK=1 so `make verify` doesn't spam the
+# telemetry collector with hundreds of grange invocations. But THIS test
+# needs to verify the default-on behavior, so unset it here. The off-switch
+# tests below set DO_NOT_TRACK=1 explicitly where needed.
+unset DO_NOT_TRACK
+unset CI
+unset GITHUB_ACTIONS
 BIN="${BIN:-./grange}"
 PORT="${PORT:-4501}"
 SCHEMA="${SCHEMA:-$HOME/ai/cli-telemetry-spec/event.schema.json}"
@@ -194,8 +201,11 @@ fi
 kill "$HANG" 2>/dev/null
 
 # ---- 7. the collector side: aggregates, closed vocabulary, no key injection
+# Raise the telemetry burst cap for this section — the test sends 5+ events
+# in rapid succession to verify aggregation and vocabulary, which would
+# otherwise trip the 3-per-10s rate limiter designed for real CLI usage.
 fuser -k "$PORT/tcp" 2>/dev/null >/dev/null; sleep 0.3
-"$BINA" serve --db "$WORK/cdb" --port "$PORT" --token teltok >/dev/null 2>&1 &
+GRANGE_TELEMETRY_BURST_CAP=100 "$BINA" serve --db "$WORK/cdb" --port "$PORT" --token teltok >/dev/null 2>&1 &
 SRV=$!
 for _ in $(seq 1 60); do sleep 0.1; curl -sf "http://localhost:$PORT/health" >/dev/null 2>&1 && break; done
 E='{"tool":"grange","version":"0.13.1","event":"install","verb":"count","os":"linux"}'
