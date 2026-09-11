@@ -93,3 +93,35 @@ honest options, in the order they are worth trying:
    machin's inferred race-freedom would accept without locks.
 3. The mailbox, last, and only if parsing ever actually shows up in a
    measurement — which it did not here.
+
+---
+
+## M52: read proxy (option 1, implemented)
+
+`serve --read-proxy http://127.0.0.1:8802` routes data GETs (`/get`, `/find`,
+`/count`, `/agg`, `/export`, `/stats`) to a local `--follow` replica.  Writes
+and static routes stay on the primary.  If the follower is unreachable, the
+proxy falls back to local handling — the primary degrades gracefully rather
+than 503ing every read.
+
+The follower is a separate process with its own actor loop, so a slow scan on
+the follower does not block writes on the primary, and a write on the primary
+does not block reads on the follower.  The follower refreshes from disk before
+every read (`gr_refresh`), so it sees all committed data.
+
+For N concurrent readers, run N followers on different ports and put a load
+balancer in front of them.  The primary's `--read-proxy` takes one URL; an
+external LB (Traefik, nginx) can round-robin across N followers.
+
+Setup (hosted instance):
+
+```sh
+# follower — same db dir, read-only
+grange serve --db /data --follow --port 8802 --token $TOK
+
+# primary — proxy reads to the follower
+grange serve --db /data --port 8801 --token $TOK --read-proxy http://127.0.0.1:8802
+```
+
+What is still open after this: option 2 (snapshot reads from immutable cold
+runs) for in-process read concurrency without a separate process.

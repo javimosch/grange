@@ -1,0 +1,49 @@
+// serveproxy.src — read proxy for concurrent reads.
+//
+// The single-actor server means one slow query blocks every other request,
+// including cross-tenant on the hosted instance.  Routing GETs to a local
+// --follow replica gives real read concurrency with no engine change and no
+// new race surface — the follower is a separate process with its own actor
+// loop (docs/CONCURRENCY.md, option 1).
+//
+// If the follower is unreachable, the proxy falls back to local handling so
+// the primary degrades gracefully rather than 503ing every read.
+
+var g_read_proxy = ""
+
+func srv_status_str(code) (s) {
+    s = str(code) + " OK"
+    if code == 200 { s = "200 OK"  return }
+    if code == 400 { s = "400 Bad Request"  return }
+    if code == 401 { s = "401 Unauthorized"  return }
+    if code == 403 { s = "403 Forbidden"  return }
+    if code == 404 { s = "404 Not Found"  return }
+    if code == 429 { s = "429 Too Many Requests"  return }
+    if code == 500 { s = "500 Internal Server Error"  return }
+    if code == 503 { s = "503 Service Unavailable"  return }
+}
+
+// srv_try_proxy forwards a data GET to the read replica.  Returns handled=1
+// if proxied (response is set), handled=0 if the primary should handle it
+// locally (no replica configured, not a proxyable route, or replica down).
+func srv_try_proxy(req) (res, handled) {
+    res = srv_err("503 Service Unavailable", "proxy", "unreachable")
+    handled = 0
+    if len(g_read_proxy) == 0 { return }
+    if srv_method(req) != "GET" { return }
+    // only proxy data-plane reads; static/operational routes stay local
+    if srv_route(req.path, "/get") == false &&
+       srv_route(req.path, "/find") == false &&
+       srv_route(req.path, "/count") == false &&
+       srv_route(req.path, "/agg") == false &&
+       srv_route(req.path, "/export") == false &&
+       srv_route(req.path, "/stats") == false { return }
+    url := g_read_proxy + req.path
+    headers := []string{}
+    h := header(req, "authorization")
+    if len(h) > 0 { headers = append(headers, "authorization: " + h) }
+    code, body, err := http_request("GET", url, headers, "")
+    if len(err) > 0 { return }
+    res = response(srv_status_str(code), "application/json", body)
+    handled = 1
+}

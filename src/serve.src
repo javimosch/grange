@@ -201,6 +201,13 @@ func srv_handle(req) (res) {
         res = mres
         return
     }
+    // read proxy: route data GETs to a local --follow replica for concurrent
+    // reads.  Falls back to local handling if the replica is down.
+    pres, phandled := srv_try_proxy(req)
+    if phandled == 1 {
+        res = pres
+        return
+    }
     if g_srv_follow == 1 && req.method == "POST" && req.path != "/shutdown" {
         res = srv_err("403 Forbidden", "read-only", "this is a follower; write to the primary")
         return
@@ -446,6 +453,8 @@ func cmd_serve(fs) {
     if port == 0 { port = 4444 }
     g_srv_token = flag_get(fs, "token")
     if len(g_srv_token) == 0 { g_srv_token = env("GRANGE_TOKEN") }
+    g_read_proxy = flag_get(fs, "read-proxy")
+    if len(g_read_proxy) == 0 { g_read_proxy = env("GRANGE_READ_PROXY") }
     generated := 0
     if len(g_srv_token) == 0 {
         g_srv_token = to_hex(rand_bytes(16))

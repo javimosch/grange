@@ -254,7 +254,7 @@ func cmd_guide() {
     s = s + "-sum a,b] [--minmax a,b] -> {group_by,mode,groups}\",\"index\":\"--db --coll --field F [--sums a,b] [--range] -> {field,docs_indexed}\",\"indexes\":\""
     s = s + "--db --coll -> declared indexes\",\"export\":\"--db --coll [--where] [--fields a,b] -> every matching document\",\"compact\":\"--db --coll -> {gen,doc"
     s = s + "s}\",\"verify\":\"--db --coll -> {intact,issues}; exit 92 when not intact\",\"stats\":\"--db --coll -> {docs|docs_estimate,gen,runs,rss_kb,...}\",\"co"
-    s = s + "ld\":\"--db --coll -> convert the collection to disk-resident storage\",\"serve\":\"--db --port --token [--follow] -> HTTP server (single actor)\",\"f"
+    s = s + "ld\":\"--db --coll -> convert the collection to disk-resident storage\",\"serve\":\"--db --port --token [--follow] [--read-proxy URL] -> HTTP server (single actor)\",\"f"
     s = s + "ollow\":\"--from URL --rtoken T --remote-db --remote-coll --db --coll [--once] -> pull a remote primary into a local db\",\"bench\":\"--db --n [--vs-s"
     s = s + "qlite]\",\"torture\":\"--db --n --batch [--cold] -> crash-test writer used by the crash harnesses\",\"guide\":\"this document\",\"help-json\":\"machin"
     s = s + "e-readable command list\"},\"http\":{\"read\":\"GET /get /find /count /agg /export /stats /verify /collections /dbs /usage /watch /health /ready /guid"
@@ -290,7 +290,7 @@ func cmd_guide() {
     s = s + "`follow` across machines is async).\",\"env\":{\"GRANGE_TELEMETRY\":\"0/false/off disables usage telemetry entirely (nothing is sent). DO_NOT_TRACK=1 "
     s = s + "is honoured too, and CI is detected and defaults to off\",\"GRANGE_TELEMETRY_URL\":\"point telemetry at your own collector instead of grange.intrane.f"
     s = s + "r/t — an organisation that wants the signal in-house should not have to choose between on and off\",\"GRANGE_TOKEN\":\"serve: bearer token (else --tok"
-    s = s + "en, else generated)\",\"GRANGE_DB\":\"serve: database directory when --db is absent\",\"GRANGE_FSYNC\":\"0 disables fsync on commit (faster, not crash"
+    s = s + "en, else generated)\",\"GRANGE_READ_PROXY\":\"serve: proxy data GETs to a --follow replica URL (else --read-proxy)\",\"GRANGE_DB\":\"serve: database directory when --db is absent\",\"GRANGE_FSYNC\":\"0 disables fsync on commit (faster, not crash"
     s = s + "-safe against power loss)\",\"GRANGE_MAX_SCAN_DOCS\":\"refuse a query after N documents examined; the error names the field to index\",\"GRANGE_MAX_SC"
     s = s + "AN_PAGES\":\"same, in pages read\",\"GRANGE_MAX_RSS_MB\":\"restart the process when RSS exceeds this (watchdog)\",\"GRANGE_HOT_MAX_CHUNKS\":\"auto-comp"
     s = s + "act a HOT (non-cold) collection once its WAL chunk count exceeds this (default 500); the cold-mode equivalent of GRANGE_MAX_RUNS, for a collection type"
@@ -347,7 +347,7 @@ func cmd_help_json() {
     s = s + "re\",\"--fields\"],\"out\":\"{count,items}\"},{\"name\":\"compact\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{gen,docs}\"},{\"name\":\"verify\",\"fla"
     s = s + "gs\":[\"--db\",\"--coll\"],\"out\":\"{intact,issues}; exit 92 if not intact\"},{\"name\":\"stats\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{docs,gen"
     s = s + ",runs,rss_kb}\"},{\"name\":\"cold\",\"flags\":[\"--db\",\"--coll\"],\"out\":\"{cold:true}\"},{\"name\":\"serve\",\"flags\":[\"--db\",\"--port\",\"--to"
-    s = s + "ken\",\"--follow\"],\"out\":\"HTTP server\"},{\"name\":\"follow\",\"flags\":[\"--from\",\"--rtoken\",\"--remote-db\",\"--remote-coll\",\"--db\",\"--co"
+    s = s + "ken\",\"--follow\",\"--read-proxy\"],\"out\":\"HTTP server\"},{\"name\":\"follow\",\"flags\":[\"--from\",\"--rtoken\",\"--remote-db\",\"--remote-coll\",\"--db\",\"--co"
     s = s + "ll\",\"--once\"],\"out\":\"replication into a local db\"},{\"name\":\"bench\",\"flags\":[\"--db\",\"--n\",\"--vs-sqlite\"],\"out\":\"benchmark metrics"
     s = s + "\"},{\"name\":\"torture\",\"flags\":[\"--db\",\"--n\",\"--batch\",\"--cold\"],\"out\":\"crash-test writer\"},{\"name\":\"guide\",\"flags\":[],\"out\":"
     s = s + "\"feature catalog\"},{\"name\":\"help-json\",\"flags\":[],\"out\":\"this command list\"}]}"
@@ -383,6 +383,7 @@ func main() {
     fs = flag_str(fs, "group-by", "g", "", "agg: field to group by")
     fs = flag_int(fs, "port", "p", "4444", "serve: HTTP port")
     fs = flag_str(fs, "token", "t", "", "serve: bearer token (default GRANGE_TOKEN or generated)")
+    fs = flag_str(fs, "read-proxy", "", "", "serve: proxy data GETs to a --follow replica (default GRANGE_READ_PROXY)")
     fs = flag_str(fs, "sum", "u", "", "agg: comma-separated numeric fields to sum/avg")
     fs = flag_str(fs, "minmax", "m", "", "agg: comma-separated numeric fields to min/max (scan path)")
     fs = flag_bool(fs, "range", "R", "index: also keep a sorted projection for > < >= <= queries")
