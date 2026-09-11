@@ -78,6 +78,9 @@ concurrent: build
 diskfull: build
 	./scripts/disk_full_test.sh ./$(BIN)
 
+ratelimit: build
+	./scripts/rate_limit_test.sh ./$(BIN)
+
 retention: build
 	./scripts/retention_test.sh ./$(BIN)
 
@@ -120,9 +123,9 @@ fuzz: build
 	./scripts/fuzz_cold.sh 1200 6
 	python3 scripts/fuzz_replica.py 150 3
 
-verify: check test embed guide sdkversion journey backup projection routes durability isolation pagination inclause doccoverage telemetry indexbuild retention replicas concurrent diskfull soak bench crash fuzz
+verify: check test embed guide sdkversion journey backup projection routes durability isolation pagination inclause doccoverage telemetry indexbuild retention replicas concurrent diskfull ratelimit soak bench crash fuzz
 
 clean:
 	rm -f $(BIN) $(BIN).mfl
 
-.PHONY: build release stranger telemetry check test embed guide sdkversion journey backup projection routes durability isolation pagination inclause doccoverage telemetry indexbuild retention replicas concurrent diskfull soak bench crash verify clean
+.PHONY: build release stranger telemetry check test embed guide sdkversion journey backup projection routes durability isolation pagination inclause doccoverage telemetry indexbuild retention replicas concurrent diskfull ratelimit soak bench crash verify clean
