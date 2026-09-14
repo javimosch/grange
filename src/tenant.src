@@ -73,7 +73,10 @@ func tn_rl_flush() {
                 bv, berr := json_get(prev, ".throttled_total")
                 if len(berr) == 0 { base = parse_int(bv) }
             }
-            gr_put("rl-" + tids[i], "{\"throttled_total\":" + str(base + g_rl_hits[tids[i]]) + ",\"last_ms\":" + str(now_ms()) + ",\"limit_per_min\":" + str(tn_rate_limit()) + "}")
+            // the limit differs for admin vs tenant — record the right one
+            lim := tn_rate_limit()
+            if tids[i] == "__admin" { lim = tn_admin_rate_limit() }
+            gr_put("rl-" + tids[i], "{\"throttled_total\":" + str(base + g_rl_hits[tids[i]]) + ",\"last_ms\":" + str(now_ms()) + ",\"limit_per_min\":" + str(lim) + "}")
             delete(g_rl_hits, tids[i])
         }
         i = i + 1

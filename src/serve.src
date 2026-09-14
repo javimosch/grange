@@ -27,6 +27,16 @@ var g_req_method = "GET"
 var g_shutdown = 0
 var g_signalfd = -1
 
+// srv_flush_state persists rate-limit throttle counters to _sys before a
+// clean exit, so a restart doesn't lose the running throttled_total. The RSS
+// watchdog already does this; graceful shutdown (SIGTERM/_shutdown) needs it
+// too, or a restart right after a throttle burst resets the visible counter.
+func srv_flush_state() {
+    gr_commit()
+    uok, _ := gr_use(g_srv_db, "_sys")
+    if uok == 1 { tn_rl_flush()  gr_commit() }
+}
+
 // srv_setup_signals blocks SIGTERM and SIGINT and creates a signalfd that
 // delivers them as readable events. The accept loop polls the fd each
 // iteration (it already cycles every 250ms via the server socket timeout)
@@ -560,6 +570,7 @@ func cmd_serve(fs) {
         // the idle case (signal arrived between requests).
         if g_shutdown == 1 {
             watch_drain()
+            srv_flush_state()
             write(2, "{\"event\":\"shutdown\"}\n")
             flush()
             exit(0)
@@ -600,6 +611,7 @@ func cmd_serve(fs) {
                         access_log(req, res.status, len(res.body), now_ms() - started)
                         if g_shutdown == 1 {
                             watch_drain()
+                            srv_flush_state()
                             write(2, "{\"event\":\"shutdown\"}\n")
                             flush()
                             exit(0)
