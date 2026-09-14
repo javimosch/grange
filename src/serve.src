@@ -221,6 +221,24 @@ func srv_handle(req) (res) {
         res = ok_json("{\"ok\":true,\"service\":\"grange\",\"pid\":" + str(getpid()) + "}")
         return
     }
+    // /metrics — Prometheus text exposition, loopback-only (same gate as
+    // /_health: the default bind is 127.0.0.1). Exposes request count, arena
+    // resets, document count, WAL sequence, RSS, and loaded collections —
+    // enough for an operator or perrus-cli to track health over time without
+    // exposing tenant data or secrets.
+    if srv_method(req) == "GET" && srv_route(req.path, "/metrics") {
+        m := "# grange metrics\n"
+        m = m + "grange_requests_total " + str(g_req_count) + "\n"
+        m = m + "grange_arena_resets_total " + str(g_resets) + "\n"
+        m = m + "grange_docs_total " + str(gr_count()) + "\n"
+        m = m + "grange_wal_seq " + str(g_seq) + "\n"
+        m = m + "grange_rss_kb " + str(bench_rss_kb()) + "\n"
+        m = m + "grange_loaded_collections " + str(len(R_loaded)) + "\n"
+        m = m + "grange_pid " + str(getpid()) + "\n"
+        res = ok_text(m)
+        res.ctype = "text/plain; version=0.0.4; charset=utf-8"
+        return
+    }
     // cli-daemon-spec §3 — POST /_shutdown responds 200 before exiting. Open
     // here (before the auth gate) because the default bind is loopback: only a
     // co-resident process can reach 127.0.0.1, so the token §3 mandates off-
