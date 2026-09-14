@@ -554,6 +554,16 @@ func cmd_serve(fs) {
     write(2, "[serve] listening on http://" + host + ":" + str(port) + "\n")
     flush()
     for {
+        // On shutdown (signal or /_shutdown), drain parked watchers with a
+        // 503 and exit AFTER the in-flight request completes — the check at
+        // the bottom of the loop handles the in-flight case; this handles
+        // the idle case (signal arrived between requests).
+        if g_shutdown == 1 {
+            watch_drain()
+            write(2, "{\"event\":\"shutdown\"}\n")
+            flush()
+            exit(0)
+        }
         conn := accept(server)
         if conn >= 0 {
             started := now_ms()
@@ -589,7 +599,9 @@ func cmd_serve(fs) {
                         g_req_count = g_req_count + 1
                         access_log(req, res.status, len(res.body), now_ms() - started)
                         if g_shutdown == 1 {
+                            watch_drain()
                             write(2, "{\"event\":\"shutdown\"}\n")
+                            flush()
                             exit(0)
                         }
                     }
@@ -603,7 +615,6 @@ func cmd_serve(fs) {
             write(2, "{\"event\":\"signal\",\"action\":\"graceful_shutdown\"}\n")
             flush()
             g_shutdown = 1
-            exit(0)
         }
     }
 }

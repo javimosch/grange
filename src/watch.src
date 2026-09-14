@@ -115,3 +115,20 @@ func watch_tick() {
     g_w_deadline = kdl
 }
 
+// watch_drain wakes every parked watcher with a 503 so they reconnect to
+// the next process, instead of holding a dead connection until the kernel
+// resets it. Called on graceful shutdown (SIGTERM/SIGINT/_shutdown).
+func watch_drain() {
+    i := 0
+    while i < len(g_w_fd) {
+        srv_write_res(g_w_fd[i], srv_err("503 Service Unavailable", "shutting-down", "server is shutting down; retry"))
+        i = i + 1
+    }
+    g_w_fd = []int{}
+    g_w_tid = []string{}
+    g_w_db = []string{}
+    g_w_coll = []string{}
+    g_w_since = []int{}
+    g_w_deadline = []int{}
+}
+
