@@ -34,3 +34,7 @@ extern "signalfd" {
     header "sys/signalfd.h"
     fn signalfd(i32, ptr, i32) i32
 }
+extern "statvfs" {
+    header "sys/statvfs.h"
+    fn statvfs(string, ptr) i32
+}

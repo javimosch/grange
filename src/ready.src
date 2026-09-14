@@ -46,6 +46,36 @@ func rdy_writable(root) (yes) {
     yes = 1
 }
 
+// rdy_free_bytes reports the free space available to an unprivileged process on
+// the filesystem holding root, via statvfs(2). Returns -1 on error (the
+// filesystem is unreadable or statvfs is unavailable). Used by /ready so a
+// filling disk surfaces before writes start failing with 507.
+func rdy_free_bytes(root) (bytes) {
+    bytes = 0 - 1
+    buf := alloc(112)
+    if statvfs(root, buf) != 0 { free(buf)  return }
+    // statvfs fields are unsigned long (8 bytes on x86_64). peek_u64 isn't a
+    // builtin, so compose from two peek_i32 reads (little-endian: lo at offset,
+    // hi at offset+4). f_frsize is at offset 8, f_bavail at offset 32.
+    frsize_lo := peek_i32(buf, 8)
+    frsize_hi := peek_i32(buf, 12)
+    bavail_lo := peek_i32(buf, 32)
+    bavail_hi := peek_i32(buf, 36)
+    free(buf)
+    frsize := frsize_lo + frsize_hi * 4294967296
+    bavail := bavail_lo + bavail_hi * 4294967296
+    bytes = frsize * bavail
+}
+
+// rdy_disk_min_bytes is the threshold below which /ready reports not-ready.
+// Default 1 GiB — tight enough to catch a filling disk before writes fail,
+// loose enough that a healthy VPS doesn't flap. Set GRANGE_DISK_MIN_BYTES=0 to
+// disable the check (not recommended in production).
+func rdy_disk_min_bytes() (bytes) {
+    bytes = parse_int(env("GRANGE_DISK_MIN_BYTES"))
+    if bytes == 0 { bytes = 1073741824 }
+}
+
 // gr_ready assembles the report. Returns (json, ready) so the caller can pick
 // the HTTP status: a readiness probe that answers 200 while reporting failures
 // is decoration.
@@ -85,6 +115,21 @@ func gr_ready(root) (data, ready) {
         }
     }
 
+    // disk space: report not-ready when free space drops below the threshold,
+    // so the monitor catches a filling disk before writes start failing 507.
+    freeb := rdy_free_bytes(root)
+    free_mb := 0
+    disk_low := 0
+    minb := rdy_disk_min_bytes()
+    if freeb >= 0 && minb > 0 {
+        free_mb = freeb / 1048576
+        if freeb < minb {
+            disk_low = 1
+            ready = 0
+            failing = append(failing, "\"disk-near-full\"")
+        }
+    }
+
     role := "primary"
     if g_srv_follow == 1 { role = "follower" }
 
@@ -99,6 +144,8 @@ func gr_ready(root) (data, ready) {
         ",\"chunks_skipped_on_open\":" + str(skipped) +
         ",\"backup_age_hours\":" + agestr +
         ",\"backup_max_hours\":" + str(rdy_backup_max_hours()) +
+        ",\"disk_free_mb\":" + str(free_mb) +
+        ",\"disk_near_full\":" + str(disk_low) +
         ",\"collections_loaded\":" + str(len(R_loaded)) +
         ",\"version\":\"" + grange_version() + "\"" +
         ",\"failing\":[" + join(failing, ",") + "]}"
