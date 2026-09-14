@@ -501,7 +501,23 @@ func cmd_serve(fs) {
     g_reset_ok = 1
     if generated == 1 { g_reset_ok = 0 }
     if len(srv_argv_flag("--db")) == 0 && len(env("GRANGE_DB")) == 0 { g_reset_ok = 0 }
-    harden(16777216, 30000)
+    // Configurable request-body limit and read timeout. Defaults: 1 MiB body
+    // (enough for bulk puts, tight enough to reject memory-exhaustion attacks),
+    // 30s read timeout (anti slow-loris). GRANGE_MAX_BODY_BYTES=0 disables the
+    // body cap (not recommended in production).
+    max_body := 1048576
+    mb := env("GRANGE_MAX_BODY_BYTES")
+    if len(mb) > 0 { max_body = parse_int(mb) }
+    read_timeout := 30000
+    rt := env("GRANGE_READ_TIMEOUT_MS")
+    if len(rt) > 0 { read_timeout = parse_int(rt) }
+    harden(max_body, read_timeout)
+    // Per-connection recv/send timeout (caps how long a single request's
+    // read takes, not the full lifecycle — /watch long-polls are parked
+    // and woken by watch_tick, not held on this socket timeout).
+    conn_timeout := 5000
+    ct := env("GRANGE_CONN_TIMEOUT_MS")
+    if len(ct) > 0 { conn_timeout = parse_int(ct) }
     server := listen_on(host, port)
     socket_timeout(server, 250)
     // Announced AFTER the bind, on purpose. This line used to print first, so a
@@ -517,32 +533,41 @@ func cmd_serve(fs) {
         conn := accept(server)
         if conn >= 0 {
             started := now_ms()
-            socket_timeout(conn, 5000)
+            socket_timeout(conn, conn_timeout)
             raw := read_request(conn)
             if len(raw) == 0 {
                 close(conn)
             } else {
                 req := parse_request(raw)
-                req.remote = peer_addr(conn)
-                g_park = 0
-                // NOTE: an arena{}-wrapped read path would keep this loop's RSS flat,
-                // but gr_use stores request-derived strings into the registry deep in
-                // the call chain — ARENA001 v1 is intraprocedural and cannot prove
-                // that escape absent, so we do NOT wrap (a passing check here would
-                // be vacuous). The RSS watchdog + eviction bound memory instead.
-                // Upstream candidate: interprocedural ARENA001 provenance.
-                g_req_method = req.method
-                res := srv_handle(req)
-                if g_park > 0 {
-                    since := parse_int(query(req, "since"))
-                    watch_park(conn, since, g_park)
+                // Reject oversized bodies before processing (413). The framework's
+                // machweb_max_body gate only fires in machweb_handle, which we
+                // don't use — srv_handle is our own dispatch. Check here so a
+                // GRANGE_MAX_BODY_BYTES cap actually protects the server.
+                if max_body > 0 && len(req.body) > max_body {
+                    srv_write_res(conn, srv_err("413 Payload Too Large", "too-large", "request body exceeds GRANGE_MAX_BODY_BYTES (" + str(max_body) + ")"))
+                    close(conn)
                 } else {
-                    srv_write_res(conn, res)
-                    g_req_count = g_req_count + 1
-                    access_log(req, res.status, len(res.body), now_ms() - started)
-                    if g_shutdown == 1 {
-                        write(2, "{\"event\":\"shutdown\"}\n")
-                        exit(0)
+                    req.remote = peer_addr(conn)
+                    g_park = 0
+                    // NOTE: an arena{}-wrapped read path would keep this loop's RSS flat,
+                    // but gr_use stores request-derived strings into the registry deep in
+                    // the call chain — ARENA001 v1 is intraprocedural and cannot prove
+                    // that escape absent, so we do NOT wrap (a passing check here would
+                    // be vacuous). The RSS watchdog + eviction bound memory instead.
+                    // Upstream candidate: interprocedural ARENA provenance.
+                    g_req_method = req.method
+                    res := srv_handle(req)
+                    if g_park > 0 {
+                        since := parse_int(query(req, "since"))
+                        watch_park(conn, since, g_park)
+                    } else {
+                        srv_write_res(conn, res)
+                        g_req_count = g_req_count + 1
+                        access_log(req, res.status, len(res.body), now_ms() - started)
+                        if g_shutdown == 1 {
+                            write(2, "{\"event\":\"shutdown\"}\n")
+                            exit(0)
+                        }
                     }
                 }
             }
