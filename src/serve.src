@@ -552,6 +552,14 @@ func cmd_serve(fs) {
     conn_timeout := 5000
     ct := env("GRANGE_CONN_TIMEOUT_MS")
     if len(ct) > 0 { conn_timeout = parse_int(ct) }
+    // Aggregate request deadline: caps the total time from accept to response,
+    // not just per-recv. A slowloris client sending 1 byte per second holds
+    // the single-actor accept loop for the full conn_timeout per read; a
+    // request deadline drops the connection if the total exceeds this.
+    // Default 2000ms; /watch is exempt (it parks, not blocks). 0 disables.
+    req_deadline := 2000
+    rd := env("GRANGE_REQUEST_DEADLINE_MS")
+    if len(rd) > 0 { req_deadline = parse_int(rd) }
     server := listen_on(host, port)
     socket_timeout(server, 250)
     // Announced AFTER the bind, on purpose. This line used to print first, so a
@@ -580,7 +588,13 @@ func cmd_serve(fs) {
             started := now_ms()
             socket_timeout(conn, conn_timeout)
             raw := read_request(conn)
-            if len(raw) == 0 {
+            // Aggregate request deadline: if the read alone exceeded the
+            // deadline, the client is too slow (slowloris) — drop with 408
+            // instead of dispatching and holding the accept loop longer.
+            if req_deadline > 0 && now_ms() - started > req_deadline {
+                srv_write_res(conn, srv_err("408 Request Timeout", "slow-client", "request read exceeded GRANGE_REQUEST_DEADLINE_MS (" + str(req_deadline) + "ms)"))
+                close(conn)
+            } else if len(raw) == 0 {
                 close(conn)
             } else {
                 req := parse_request(raw)
@@ -606,15 +620,24 @@ func cmd_serve(fs) {
                         since := parse_int(query(req, "since"))
                         watch_park(conn, since, g_park)
                     } else {
-                        srv_write_res(conn, res)
-                        g_req_count = g_req_count + 1
-                        access_log(req, res.status, len(res.body), now_ms() - started)
-                        if g_shutdown == 1 {
-                            watch_drain()
-                            srv_flush_state()
-                            write(2, "{\"event\":\"shutdown\"}\n")
-                            flush()
-                            exit(0)
+                        // Aggregate request deadline: if dispatch pushed the
+                        // total time past the deadline, return 408 instead of
+                        // the (possibly expensive) response — protects the
+                        // single-actor accept loop from a slow handler.
+                        if req_deadline > 0 && now_ms() - started > req_deadline {
+                            srv_write_res(conn, srv_err("408 Request Timeout", "slow-request", "total request time exceeded GRANGE_REQUEST_DEADLINE_MS (" + str(req_deadline) + "ms)"))
+                            close(conn)
+                        } else {
+                            srv_write_res(conn, res)
+                            g_req_count = g_req_count + 1
+                            access_log(req, res.status, len(res.body), now_ms() - started)
+                            if g_shutdown == 1 {
+                                watch_drain()
+                                srv_flush_state()
+                                write(2, "{\"event\":\"shutdown\"}\n")
+                                flush()
+                                exit(0)
+                            }
                         }
                     }
                 }
