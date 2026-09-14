@@ -32,7 +32,7 @@ jobs:
       - name: Smoke test
         run: |
           DB=$(mktemp -d)
-          ./grange put --db "$DB" --doc '{"id":"a","v":1}'
-          ./grange get --db "$DB" --id a
+          ID=$(./grange put --db "$DB" --doc '{"v":1}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["id"])')
+          ./grange get --db "$DB" --id "$ID"
           ./grange count --db "$DB"
           rm -rf "$DB"
