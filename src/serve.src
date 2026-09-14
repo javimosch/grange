@@ -221,12 +221,18 @@ func srv_handle(req) (res) {
         res = ok_json("{\"ok\":true,\"service\":\"grange\",\"pid\":" + str(getpid()) + "}")
         return
     }
-    // /metrics — Prometheus text exposition, loopback-only (same gate as
-    // /_health: the default bind is 127.0.0.1). Exposes request count, arena
-    // resets, document count, WAL sequence, RSS, and loaded collections —
-    // enough for an operator or perrus-cli to track health over time without
-    // exposing tenant data or secrets.
+    // /metrics — Prometheus text exposition. Requires the admin bearer token:
+    // the default bind is loopback, but behind a reverse proxy (Traefik on dk1)
+    // the loopback gate is bypassed, so /metrics would be publicly exposed
+    // without auth. Exposes request count, arena resets, document count, WAL
+    // sequence, RSS, and loaded collections — enough for an operator or
+    // perrus-cli to track health over time without exposing tenant data.
     if srv_method(req) == "GET" && srv_route(req.path, "/metrics") {
+        role, _ := srv_role(req)
+        if role != "admin" {
+            res = srv_err("401 Unauthorized", "auth", "missing or wrong bearer token (admin only)")
+            return
+        }
         m := "# grange metrics\n"
         m = m + "grange_requests_total " + str(g_req_count) + "\n"
         m = m + "grange_arena_resets_total " + str(g_resets) + "\n"
