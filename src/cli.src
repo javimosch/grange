@@ -401,6 +401,7 @@ func main() {
         emit_err(80, "input", "missing verb", 1, "run: grange help-json")
     }
     verb := rest[0]
+    if verb == "serve" { srv_setup_signals() }
     cli_dispatch(fs, verb)
     // Telemetry fires HERE: after the verb has finished and its result is on
     // stdout, so it can never be the reason a command felt slow, and never the

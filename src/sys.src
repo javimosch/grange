@@ -5,6 +5,12 @@
 // are all in libc (always linked), so no cflags/-l is required. getpid() is
 // used by /_health (cli-daemon-spec §2: the body carries the pid); the rest
 // detach a background serve process (§4 start) and reap it (§5 PID variant).
+//
+// Signal handling: machin has no FFI callbacks (MFL closures as C function
+// pointers), so we cannot install a conventional signal handler. Instead we
+// use signalfd(2): block SIGTERM/SIGINT with sigprocmask, create a signalfd
+// that delivers them as readable events, and poll it in the accept loop.
+// This gives graceful shutdown on `systemctl stop` without a callback.
 
 extern "unistd" {
     header "unistd.h"
@@ -17,8 +23,14 @@ extern "unistd" {
 extern "fcntl" {
     header "fcntl.h"
     fn open(string, i32, i32) i32
+    fn fcntl(i32, i32, i32) i32
 }
 extern "signal" {
     header "signal.h"
     fn kill(i32, i32) i32
+    fn sigprocmask(i32, ptr, ptr) i32
+}
+extern "signalfd" {
+    header "sys/signalfd.h"
+    fn signalfd(i32, ptr, i32) i32
 }

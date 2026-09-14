@@ -25,6 +25,38 @@ var g_srv_follow = 0
 // threading the request through the writer (which watch_park also calls).
 var g_req_method = "GET"
 var g_shutdown = 0
+var g_signalfd = -1
+
+// srv_setup_signals blocks SIGTERM and SIGINT and creates a signalfd that
+// delivers them as readable events. The accept loop polls the fd each
+// iteration (it already cycles every 250ms via the server socket timeout)
+// and sets g_shutdown when a signal arrives — giving graceful shutdown on
+// `systemctl stop` without dropping in-flight requests.
+func srv_setup_signals() {
+    // sigset_t on glibc x86_64 is 128 bytes (supports signals 1-1024). We
+    // allocate the full size so sigprocmask/signalfd don't read past the end.
+    // SIGTERM=15 -> bit 14, SIGINT=2 -> bit 1, both in the first 64-bit word.
+    mask := alloc(128)
+    poke_i32(mask, 0, 16386)  // (1 << 14) | (1 << 1) = 16384 | 2
+    // Block the signals so they are delivered via signalfd, not the default
+    // disposition (which terminates the process immediately).
+    sigprocmask(0, mask, 0)  // SIG_BLOCK=0 (add to existing mask)
+    fd := signalfd(-1, mask, 0)
+    if fd >= 0 {
+        fcntl(fd, 4, 2048)  // F_SETFL=4, O_NONBLOCK=2048
+        g_signalfd = fd
+    }
+    free(mask)
+}
+
+// srv_poll_signal does a non-blocking read on the signalfd. Returns 1 if a
+// signal was received (SIGTERM or SIGINT), 0 otherwise.
+func srv_poll_signal() (got) {
+    got = 0
+    if g_signalfd < 0 { return }
+    s := read(g_signalfd)
+    if len(s) > 0 { got = 1 }
+}
 func srv_json(status, body) (res) {
     res = response(status, "application/json", body)
 }
@@ -518,5 +550,11 @@ func cmd_serve(fs) {
         watch_tick()
         srv_maybe_reset()
         srv_rss_watchdog()
+        if srv_poll_signal() == 1 {
+            write(2, "{\"event\":\"signal\",\"action\":\"graceful_shutdown\"}\n")
+            flush()
+            g_shutdown = 1
+            exit(0)
+        }
     }
 }
