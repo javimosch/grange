@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install machin
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/javimosch/machin/main/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify machin
+        run: machin guide | head -c 60
+
+      - name: Check
+        run: make check
+
+      - name: Test
+        run: make test
+
+      - name: Build
+        run: make build
+
+      - name: Smoke test
+        run: |
+          DB=$(mktemp -d)
+          ./grange put --db "$DB" --doc '{"id":"a","v":1}'
+          ./grange get --db "$DB" --id a
+          ./grange count --db "$DB"
+          rm -rf "$DB"
