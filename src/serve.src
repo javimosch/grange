@@ -519,11 +519,11 @@ func cmd_serve(fs) {
     g_reset_ok = 1
     if generated == 1 { g_reset_ok = 0 }
     if len(srv_argv_flag("--db")) == 0 && len(env("GRANGE_DB")) == 0 { g_reset_ok = 0 }
-    // Configurable request-body limit and read timeout. Defaults: 1 MiB body
-    // (enough for bulk puts, tight enough to reject memory-exhaustion attacks),
-    // 30s read timeout (anti slow-loris). GRANGE_MAX_BODY_BYTES=0 disables the
-    // body cap (not recommended in production).
-    max_body := 1048576
+    // Configurable request-body limit and read timeout. Defaults: 16 MiB body
+    // (enough for bulk puts of tens of thousands of docs; tighten with
+    // GRANGE_MAX_BODY_BYTES for hosted/multi-tenant), 30s read timeout (anti
+    // slow-loris). GRANGE_MAX_BODY_BYTES=0 disables the body cap.
+    max_body := 16777216
     mb := env("GRANGE_MAX_BODY_BYTES")
     if len(mb) > 0 { max_body = parse_int(mb) }
     read_timeout := 30000
