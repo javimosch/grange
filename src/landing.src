@@ -76,7 +76,7 @@ func landing_html() (h) {
         "<meta name=\"description\" content=\"Agent-first document DB: one static binary, crash-safe, faster than SQLite on indexed workloads. Hosted pay-as-you-go at 0.15EUR/GB/month via peage.\">" +
         "<style>:root{--bg:#0a0a0f;--panel:#111118;--panel2:#16161f;--line:#1e1e2a;--fg:#e8e8f0;--dim:#8888a0;--dimmer:#55556a;--acc:#52b788;--acc2:#2d6a4f;--warn:#e9c46a;--code-bg:#0d0d14;--code-line:#1a1a24;--radius:12px}" +
         "*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;line-height:1.7;-webkit-font-smoothing:antialiased}" +
-        "main{max-width:960px;margin:0 auto;padding:0 2rem 4rem}" +
+        "main{max-width:1080px;margin:0 auto;padding:0 2.5rem 4rem}" +
         "nav{display:flex;align-items:center;justify-content:space-between;padding:1.25rem 0;border-bottom:1px solid var(--line);margin-bottom:0}" +
         "nav .brand{display:flex;align-items:center;gap:.5rem;font-weight:700;font-size:1.05rem;color:var(--fg);text-decoration:none;letter-spacing:-.01em}" +
         "nav .brand img{width:24px;height:24px}" +
@@ -86,7 +86,7 @@ func landing_html() (h) {
         ".hero-tags{display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:1.5rem}" +
         ".tag{display:inline-block;border:1px solid var(--line);border-radius:99px;padding:3px 12px;font-size:.72rem;color:var(--dim);background:var(--panel);letter-spacing:.02em}" +
         "h1{font-size:2.6rem;font-weight:800;margin:0 0 .4rem;letter-spacing:-.03em;line-height:1.1}h1 em{color:var(--acc);font-style:normal}" +
-        ".sub{color:var(--dim);font-size:1.05rem;margin:.4rem 0 0;max-width:580px;line-height:1.6}" +
+        ".sub{color:var(--dim);font-size:1.05rem;margin:.4rem 0 0;max-width:720px;line-height:1.6}" +
         ".warn{color:var(--warn);font-size:.82rem;margin-top:.8rem}" +
         "h2{color:var(--fg);font-size:1.3rem;font-weight:700;margin-top:3.5rem;padding-bottom:.5rem;border-bottom:1px solid var(--line);letter-spacing:-.01em}" +
         "h2::before{content:'// ';color:var(--acc);font-weight:400;font-family:'JetBrains Mono',ui-monospace,monospace}" +
