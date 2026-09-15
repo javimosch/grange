@@ -113,9 +113,21 @@ func gr_verify(deep) (data, issues) {
     }
     // 2. cold: manifests must agree with their pages, and declared indexes exist
     if g_cold == 1 {
-        if len(g_run_rid) == 0 && files > 1 {
-            items = vf_issue(items, gr_pad6(g_gen), "cold collection has no valid run manifest for its generation")
-            issues = issues + 1
+        // A cold collection with no runs is valid if its data is still in the
+        // WAL (pre-first-flush): the chunks replay into the memtable on open.
+        // Only flag "no valid run manifest" if there are crun-* page files
+        // orphaned without a manifest — those are the actual damage.
+        if len(g_run_rid) == 0 {
+            has_crun := 0
+            ei := 0
+            while ei < len(entries) {
+                if has_prefix(entries[ei], "crun-") { has_crun = 1 }
+                ei = ei + 1
+            }
+            if has_crun == 1 {
+                items = vf_issue(items, gr_pad6(g_gen), "cold collection has no valid run manifest for its generation")
+                issues = issues + 1
+            }
         }
         r := 0
         while r < len(g_run_rid) {
