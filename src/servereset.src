@@ -60,6 +60,11 @@ func srv_maybe_reset() {
     if len(tok) == 0 { tok = env("GRANGE_TOKEN") }
     g_srv_token = tok
     tn_load_cache()
+    // re-open the default collection so the next request finds a loaded
+    // engine state instead of the empty post-reset state. This fixes the
+    // ARENA003 corruption: g_run_pages/g_run_rid were arena pointers that
+    // gr_reset() freed; re-opening reloads them from disk.
+    _, _ = gr_use(g_srv_db, "default")
     g_req_count = 0
     g_resets = g_resets + 1
     write(2, "{\"event\":\"arena_reset\",\"resets\":" + str(g_resets) + "}\n")

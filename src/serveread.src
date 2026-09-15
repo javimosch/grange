@@ -149,5 +149,21 @@ func srv_tail_routes(req) (res, handled) {
         res = srv_ok("{\"coll\":\"" + jesc(g_coll) + "\",\"docs\":" + str(gr_count()) + ",\"gen\":" + str(g_gen) + ",\"chunks_replayed\":" + str(g_replayed_chunks) + ",\"indexes\":" + str(len(g_ifields)) + ",\"rss_kb\":" + str(bench_rss_kb()) + "}")
         return
     }
+    // /memory — the full memory-bounding picture: RSS, limit, arena resets,
+    // loaded collections, and the watchdog/reset config. Lets an operator
+    // (or perrus-cli) verify memory is bounded and flat without reading
+    // journald. Admin only (exposes internal state).
+    if srv_method(req) == "GET" && srv_route(req.path, "/memory") {
+        role, _ := srv_role(req)
+        if role != "admin" {
+            res = srv_err("401 Unauthorized", "auth", "missing or wrong bearer token (admin only)")
+            return
+        }
+        limit := srv_rss_limit_mb()
+        if limit == 0 { limit = 300 }
+        reset_every := srv_reset_every()
+        res = srv_ok("{\"rss_kb\":" + str(bench_rss_kb()) + ",\"rss_limit_mb\":" + str(limit) + ",\"arena_resets\":" + str(g_resets) + ",\"reset_every\":" + str(reset_every) + ",\"loaded_collections\":" + str(len(R_loaded)) + ",\"current_coll\":\"" + jesc(g_coll) + "\",\"cold\":" + str(g_cold) + ",\"runs\":" + str(len(g_run_rid)) + ",\"req_count_since_reset\":" + str(g_req_count) + "}")
+        return
+    }
     handled = 0
 }

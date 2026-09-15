@@ -102,6 +102,9 @@ promote: build
 concurrent_reads: build
 	./scripts/concurrent_reads_test.sh
 
+memory: build
+	./scripts/memory_test.sh
+
 retention: build
 	./scripts/retention_test.sh ./$(BIN)
 
@@ -144,9 +147,9 @@ fuzz: build
 	./scripts/fuzz_cold.sh 1200 6
 	python3 scripts/fuzz_replica.py 150 3
 
-verify: check test embed guide sdkversion journey backup projection routes durability isolation pagination inclause doccoverage telemetry indexbuild retention replicas concurrent diskfull ratelimit qinject idxcorrupt walpartial sigterm rbac promote concurrent_reads soak bench crash fuzz
+verify: check test embed guide sdkversion journey backup projection routes durability isolation pagination inclause doccoverage telemetry indexbuild retention replicas concurrent diskfull ratelimit qinject idxcorrupt walpartial sigterm rbac promote concurrent_reads memory soak bench crash fuzz
 
 clean:
 	rm -f $(BIN) $(BIN).mfl
 
-.PHONY: build release stranger telemetry check test embed guide sdkversion journey backup projection routes durability isolation pagination inclause doccoverage telemetry indexbuild retention replicas concurrent diskfull ratelimit qinject idxcorrupt walpartial sigterm rbac promote concurrent_reads soak bench crash verify clean
+.PHONY: build release stranger telemetry check test embed guide sdkversion journey backup projection routes durability isolation pagination inclause doccoverage telemetry indexbuild retention replicas concurrent diskfull ratelimit qinject idxcorrupt walpartial sigterm rbac promote concurrent_reads memory soak bench crash verify clean
