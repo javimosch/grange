@@ -7,6 +7,37 @@
 // /put /del /bulk /index /cold /compact /shutdown). The admin token is never
 // read-only.
 
+// srv_spawn_follower starts a --follow replica on port+1 and sets g_read_proxy
+// to it, giving real read concurrency (the follower is a separate process
+// with its own actor loop). Called when GRANGE_CONCURRENT_READS=1 is set and
+// no manual --read-proxy is configured. The follower inherits the same db
+// dir and token. If the spawn fails, the primary continues without a proxy
+// (degrades gracefully to single-actor, same as a proxy being down).
+func srv_spawn_follower(db, port, token) {
+    fport := port + 1
+    g_read_proxy = "http://127.0.0.1:" + str(fport)
+    exe := srv_argv_flag0()
+    if len(exe) == 0 { exe = "grange" }
+    // exec() runs via system() which waits for the shell to exit. Using
+    // nohup + & backgrounds the follower so the shell returns immediately
+    // and the follower keeps running as a daemon.
+    cmd := "nohup " + exe + " serve --db '" + db + "' --port " + str(fport) + " --token '" + token + "' --follow >/dev/null 2>&1 &"
+    code, _, err := exec(cmd)
+    if code != 0 {
+        write(2, "{\"event\":\"concurrent_reads\",\"status\":\"follower_spawn_failed\",\"port\":" + str(fport) + ",\"err\":\"" + jesc(err) + "\"}\n")
+        g_read_proxy = ""
+        return
+    }
+    write(2, "{\"event\":\"concurrent_reads\",\"status\":\"follower_spawned\",\"port\":" + str(fport) + "}\n")
+}
+
+// srv_argv_flag0 returns argv[0] — the path to the running binary.
+func srv_argv_flag0() (v) {
+    v = ""
+    a := args()
+    if len(a) > 0 { v = a[0] }
+}
+
 // srv_is_write returns 1 if the request targets a write route (POST /put
 // /del /bulk /index /cold /compact /shutdown). Used by the RBAC gate to block
 // read-only tokens from mutating the database.

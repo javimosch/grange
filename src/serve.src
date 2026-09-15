@@ -21,6 +21,7 @@ var g_w_since = []int{}
 var g_w_deadline = []int{}
 var g_park = 0
 var g_srv_follow = 0
+var g_concurrent_reads = ""
 // The request method, so srv_write_res can drop the body on a HEAD without
 // threading the request through the writer (which watch_park also calls).
 var g_req_method = "GET"
@@ -558,6 +559,15 @@ func cmd_serve(fs) {
     if len(g_srv_token) == 0 { g_srv_token = env("GRANGE_TOKEN") }
     g_read_proxy = flag_get(fs, "read-proxy")
     if len(g_read_proxy) == 0 { g_read_proxy = env("GRANGE_READ_PROXY") }
+    // GRANGE_CONCURRENT_READS=1: auto-spawn a --follow replica on port+1 and
+    // proxy data GETs to it, giving real read concurrency (the follower is a
+    // separate process with its own actor loop) without the operator having
+    // to configure --read-proxy manually. Retrocompatible: off by default,
+    // and a manual --read-proxy/GRANGE_READ_PROXY takes precedence.
+    g_concurrent_reads = env("GRANGE_CONCURRENT_READS")
+    if g_concurrent_reads == "1" && len(g_read_proxy) == 0 && g_srv_follow == 0 {
+        srv_spawn_follower(db, port, g_srv_token)
+    }
     generated := 0
     if len(g_srv_token) == 0 {
         g_srv_token = to_hex(rand_bytes(16))
