@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- grange: a barn. Minimal, geometric, flat. -->
+  <!-- Roof -->
+  <polygon points="24,56 64,20 104,56" fill="#2D6A4F" stroke="#1B4332" stroke-width="4" stroke-linejoin="round"/>
+  <!-- Body -->
+  <rect x="30" y="56" width="68" height="48" rx="4" fill="#40916C" stroke="#1B4332" stroke-width="4"/>
+  <!-- Door -->
+  <rect x="52" y="68" width="24" height="36" rx="2" fill="#1B4332" stroke="#081C15" stroke-width="2"/>
+  <!-- Door crossbar (document lines) -->
+  <line x1="56" y1="76" x2="72" y2="76" stroke="#52B788" stroke-width="2" stroke-linecap="round"/>
+  <line x1="56" y1="84" x2="72" y2="84" stroke="#52B788" stroke-width="2" stroke-linecap="round"/>
+  <line x1="56" y1="92" x2="68" y2="92" stroke="#52B788" stroke-width="2" stroke-linecap="round"/>
+  <!-- Hayloft window -->
+  <rect x="56" y="40" width="16" height="10" rx="2" fill="#1B4332"/>
+</svg>

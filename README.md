@@ -1,6 +1,25 @@
-# grange
+<p align="center">
+  <img src="assets/logo/grange.svg" width="96" height="96" alt="grange">
+</p>
 
-**A machin-native document database — agent-first, single binary, crash-safe by construction.**
+<h1 align="center">grange</h1>
+
+<p align="center">
+  <strong>A machin-native document database — agent-first, single binary, crash-safe by construction.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/javimosch/grange/actions/workflows/ci.yml"><img src="https://github.com/javimosch/grange/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/javimosch/grange/releases"><img src="https://img.shields.io/github/v/release/javimosch/grange" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License"></a>
+  <a href="https://grange.intrane.fr/llms.txt"><img src="https://img.shields.io/badge/API-agent--first-brightgreen" alt="Agent-first API"></a>
+</p>
+
+<p align="center">
+  <em>French for "barn" — a place where documents live.</em>
+</p>
+
+---
 
 grange is a document store written in pure [MFL](https://github.com/javimosch/machin) that pairs with machin apps the way SQLite pairs with C: embed the engine (`src/engine.src`) directly in your binary, or drive the standalone CLI. No server, no dependencies, no cgo — one ~7.5 MB static binary.
 
