@@ -68,7 +68,22 @@ else
     check "no-spawn" "no-spawn" "no auto-follower without flag"
 fi
 
+# 7. Restart primary with flag — follower still running, should detect not spawn
 kill $PRI 2>/dev/null; wait $PRI 2>/dev/null
+sleep 1
+# start a manual follower on FPORT first (simulates leftover from previous primary)
+$BIN serve --db "$DB" --port $FPORT --token $TOKEN --follow > /tmp/cr_fol.log 2>&1 &
+FOL=$!
+sleep 1
+GRANGE_CONCURRENT_READS=1 $BIN serve --db "$DB" --port $PORT --token $TOKEN > /tmp/cr_pri3.log 2>&1 &
+PRI=$!
+sleep 2
+contains "$(cat /tmp/cr_pri3.log)" 'follower_already_running' && check "detect" "detect" "existing follower detected, not re-spawned" || check "$(cat /tmp/cr_pri3.log)" "detect" "existing follower detected, not re-spawned"
+# verify reads still work through the proxy
+RRES=$(curl -s "$B/count" -H "Authorization: Bearer $TOKEN")
+contains "$RRES" '"count":' && check "proxy-works" "proxy-works" "proxy works with existing follower" || check "$RRES" "proxy-works" "proxy works with existing follower"
+kill $PRI 2>/dev/null; wait $PRI 2>/dev/null
+kill $FOL 2>/dev/null; wait $FOL 2>/dev/null
 FOLPID=$(ss -tlnp 2>/dev/null | grep ":$FPORT" | grep -oP 'pid=\K[0-9]+' | head -1)
 if [ -n "$FOLPID" ]; then kill $FOLPID 2>/dev/null; fi
 rm -rf "$DB"

@@ -13,8 +13,23 @@
 // no manual --read-proxy is configured. The follower inherits the same db
 // dir and token. If the spawn fails, the primary continues without a proxy
 // (degrades gracefully to single-actor, same as a proxy being down).
+//
+// Port-in-use guard: if port+1 is already listening (e.g. a follower from a
+// previous primary is still running), skip the spawn and just set the proxy.
+// This makes GRANGE_CONCURRENT_READS=1 safe to use as a replacement for a
+// dedicated follower service — the primary can restart without orphaning
+// the follower.
 func srv_spawn_follower(db, port, token) {
     fport := port + 1
+    // is something already on port+1? A leftover follower from a previous
+    // primary is fine — just proxy to it instead of spawning a duplicate.
+    test := dial("127.0.0.1", fport)
+    if test >= 0 {
+        close(test)
+        g_read_proxy = "http://127.0.0.1:" + str(fport)
+        write(2, "{\"event\":\"concurrent_reads\",\"status\":\"follower_already_running\",\"port\":" + str(fport) + "}\n")
+        return
+    }
     g_read_proxy = "http://127.0.0.1:" + str(fport)
     exe := srv_argv_flag0()
     if len(exe) == 0 { exe = "grange" }
