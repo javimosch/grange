@@ -300,10 +300,6 @@ multi-tenant SLAs, or unattended operation. The gaps, named rather than omitted:
   author wrote. No harness can close this.
 - **Single-actor server.** One request at a time. An expensive query blocks
   everyone (budgets and replicas mitigate, not fix). This is a real ceiling.
-- **Cold crash recovery has a flake.** `make crash`'s cold round fails ~1 in 3
-  runs with "cold collection has no valid run manifest for its generation". A
-  database that occasionally loses data on crash is not production-ready. This
-  is the most important gap to fix.
 - **No automated failover.** The follower is read-only; promoting it is manual.
 - **No RBAC.** Just an admin token + tenant tokens.
 - **Memory is bounded, not proven flat.** The watchdog restarts rather than

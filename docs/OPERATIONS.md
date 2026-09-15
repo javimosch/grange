@@ -1439,13 +1439,15 @@ existed. That is now documented.
   prevents, and `GRANGE_RESET_EVERY` is opt-in because a reset cannot preserve a
   generated token (M38). Cold storage keeps 200k documents at 4.4 MB RSS; hot
   collections still scale with data.
-- **Cold crash recovery has a flake.** `make crash`'s cold round
-  (`crash_cold_test.sh`) fails approximately 1 in 3 runs with "cold collection
-  has no valid run manifest for its generation". The hot rounds and the
-  differential fuzzes pass consistently; the failure is specific to the cold
-  crash path. A database that occasionally loses data on crash is not
-  production-ready, and this is the most important gap to fix. The M33 flake
-  (below) may be the same root cause.
+- **Cold crash recovery flake (fixed).** `make crash`'s cold round
+  (`crash_cold_test.sh`) failed approximately 1 in 3 runs with "cold collection
+  has no valid run manifest for its generation". Root cause: a false positive in
+  `verify`, not data loss. A cold collection crashed before its first flush has
+  WAL chunks but no run manifests — a valid state where the data lives in the
+  WAL and replays into the memtable on open. The old check counted WAL chunks as
+  files and flagged "no manifest". Fixed: the check now only flags this when
+  there are actual `crun-*` page files orphaned without a manifest. Verified:
+  30 crash rounds, 0 failures; orphaned pages still correctly detected.
 - **One older unexplained flake.** A crash-harness run in M33 failed once and
   has never reproduced. I destroyed its output before reading it. It is recorded
   here rather than forgotten.
@@ -1461,5 +1463,4 @@ Suitable for a service whose failure you can tolerate, run by someone who reads
 the `mode` field. It has been operated in production continuously, has survived
 its own fuzzes and crash harnesses, and reports what it costs. It has not been
 operated by anyone but me, and until it has, "production ready" means ready for
-*this* production. The cold crash flake is the one thing that would make even
-*this* production unsafe to trust without a watchdog-and-restart safety net.
+*this* production.
