@@ -14,6 +14,10 @@
 // GRANGE_MERCHANT_KEY; unconfigured -> accrue only, never charge).
 
 var g_tenants = make(map[string]string)
+// g_troles maps a token to "ro" (read-only). Absence = "rw" (read-write),
+// which is the default and the retrocompatible behaviour: existing tokens
+// have no role record and keep full access.
+var g_troles = make(map[string]string)
 var g_sweep_last = 0
 // fair-use rate limiting (per tenant, fixed 60s window) + trigger traceability
 var g_rl_count = make(map[string]int)
@@ -121,18 +125,49 @@ func tn_du(dir) (bytes) {
 }
 
 // tn_load_cache scans _sys into the token->tid cache (serve startup).
+// Also loads read-only token records (tok-<token>) into g_troles and
+// g_tenants, so issued tokens survive a restart.
 func tn_load_cache() {
     ok, errmsg := gr_use(g_srv_db, "_sys")
     if ok == 0 { return }
     ids := keys(g_mem)
     i := 0
     while i < len(ids) {
-        if has_prefix(ids[i], "t") && has_prefix(ids[i], "bill-") == false {
+        if has_prefix(ids[i], "tok-") {
+            rv, rerr := json_get(g_mem[ids[i]], ".role")
+            tv, terr := json_get(g_mem[ids[i]], ".tid")
+            if len(terr) == 0 {
+                tok := substr(ids[i], 4, len(ids[i]))
+                g_tenants[tok] = unq_tok(tv)
+                if len(rerr) == 0 && unq_tok(rv) == "ro" {
+                    g_troles[tok] = "ro"
+                }
+            }
+        } else if has_prefix(ids[i], "t") && has_prefix(ids[i], "bill-") == false {
             tok, terr := json_get(g_mem[ids[i]], ".token")
             if len(terr) == 0 { g_tenants[unq_tok(tok)] = ids[i] }
         }
         i = i + 1
     }
+}
+
+// tn_issue_token creates an additional token for an existing tenant with a
+// role ("rw" or "ro"). The token is stored as a tok-<token> record in _sys.
+// Returns the new token. Retrocompatible: existing one-token-per-tenant
+// behaviour is unchanged; this only adds NEW tokens.
+func tn_issue_token(tid, role) (token) {
+    token = "gt_" + to_hex(rand_bytes(16))
+    ok, errmsg := gr_use(g_srv_db, "_sys")
+    gr_put("tok-" + token, "{\"tid\":\"" + jesc(tid) + "\",\"role\":\"" + jesc(role) + "\",\"created\":" + str(now_ms()) + "}")
+    gr_commit()
+    g_tenants[token] = tid
+    if role == "ro" { g_troles[token] = "ro" }
+}
+
+// tn_role returns the role of a token: "ro" or "rw" (default).
+func tn_role(tok) (role) {
+    role = g_troles[tok]
+    if len(role) == 0 { role = "rw" }
 }
 
 func unq_tok(s) (out) {

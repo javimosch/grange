@@ -53,6 +53,7 @@ probe POST /index '{"coll":"c","field":"v"}'
 probe POST /cold  '{"coll":"c2"}'
 probe POST /compact '{"coll":"c"}'
 probe POST /tenants '{"name":"t"}'
+probe POST /tokens '{"role":"ro"}'
 
 # A MISTYPED route must 404, not answer. Most routes were matched with
 # has_prefix(req.path, "/count") — req.path carries the query string, so that was

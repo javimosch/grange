@@ -80,13 +80,17 @@ func srv_ok(data) (res) {
 }
 
 // srv_role resolves the caller: ("admin","") | ("tenant",tid) | ("","").
+// Also stashes the raw token in g_req_tok so the role check can look it up.
+var g_req_tok = ""
 func srv_role(req) (role, tid) {
     role = ""
     tid = ""
+    g_req_tok = ""
     tok := query(req, "token")
     h := header(req, "authorization")
     if has_prefix(h, "Bearer ") { tok = substr(h, 7, len(h)) }
     if len(tok) == 0 { return }
+    g_req_tok = tok
     if tok == g_srv_token { role = "admin"  return }
     if has(g_tenants, tok) == false && g_srv_follow == 1 {
         // a tenant created on the primary after this follower started:
@@ -280,9 +284,22 @@ func srv_handle(req) (res) {
         res = srv_ok("{\"tenant\":\"" + tid + "\",\"token\":\"" + ttok + "\",\"pricing\":{\"storage_cents_per_gb_month\":" + str(tn_price()) + ",\"free_bytes\":" + str(tn_free_bytes()) + ",\"pay_rail\":\"peage\"},\"how\":\"use Authorization: Bearer " + ttok + " on /put /get /find /count /agg /index /stats /usage — your data is isolated and metered by disk bytes\"}")
         return
     }
+    tres, thandled := srv_tokens_route(req)
+    if thandled == 1 {
+        res = tres
+        return
+    }
     role, tid := srv_role(req)
     if len(role) == 0 {
         res = srv_err("401 Unauthorized", "auth", "missing or wrong bearer token (tenants self-serve at POST /tenants with X-Peage-Wallet)")
+        return
+    }
+    // RBAC: read-only tokens ("ro") are blocked from write routes. Admin is
+    // never read-only. Retrocompatible: tokens without a role record default
+    // to "rw" (tn_role returns "rw" for unknown tokens), so existing tokens
+    // are unaffected.
+    if role == "tenant" && tn_role(g_req_tok) == "ro" && srv_is_write(req) == 1 {
+        res = srv_err("403 Forbidden", "read-only", "this token is read-only; write routes require a read-write token (POST /tokens with {\"role\":\"rw\"})")
         return
     }
     if role == "tenant" {

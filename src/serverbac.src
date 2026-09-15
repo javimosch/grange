@@ -1,0 +1,58 @@
+// serverbac.src — RBAC route + write-route classifier, split out of serve.src
+// to keep every file under the project's 500-line limit.
+//
+// RBAC is opt-in and retrocompatible: existing tokens have no role record and
+// default to "rw" (read-write). A tenant can issue additional read-only ("ro")
+// tokens via POST /tokens; those tokens can read (GET) but not write (POST
+// /put /del /bulk /index /cold /compact /shutdown). The admin token is never
+// read-only.
+
+// srv_is_write returns 1 if the request targets a write route (POST /put
+// /del /bulk /index /cold /compact /shutdown). Used by the RBAC gate to block
+// read-only tokens from mutating the database.
+func srv_is_write(req) (yes) {
+    yes = 0
+    if req.method != "POST" { return }
+    if srv_route(req.path, "/put") { yes = 1  return }
+    if srv_route(req.path, "/del") { yes = 1  return }
+    if srv_route(req.path, "/bulk") { yes = 1  return }
+    if srv_route(req.path, "/index") { yes = 1  return }
+    if srv_route(req.path, "/cold") { yes = 1  return }
+    if srv_route(req.path, "/compact") { yes = 1  return }
+    if srv_route(req.path, "/shutdown") { yes = 1  return }
+}
+
+// srv_tokens_route handles POST /tokens — issue an additional token for the
+// caller's tenant with a role. A tenant authenticates with their existing
+// token; admin can issue for any tenant via ?tenant=<tid>.
+// Body: {"role":"ro"} (default "rw"). Returns (res, handled).
+func srv_tokens_route(req) (res, handled) {
+    res = srv_err("404 Not Found", "not-found", "unreachable")
+    handled = 1
+    if req.method == "POST" && (srv_route(req.path, "/tokens")) {
+        role, tid := srv_role(req)
+        if len(role) == 0 {
+            res = srv_err("401 Unauthorized", "auth", "missing or wrong bearer token")
+            return
+        }
+        target_tid := tid
+        if role == "admin" {
+            target_tid = srv_body_str(req, "tenant")
+            if len(target_tid) == 0 { target_tid = query(req, "tenant") }
+            if len(target_tid) == 0 {
+                res = srv_err("400 Bad Request", "input", "admin must specify ?tenant=<tid>")
+                return
+            }
+        }
+        new_role := srv_body_str(req, "role")
+        if len(new_role) == 0 { new_role = "rw" }
+        if new_role != "rw" && new_role != "ro" {
+            res = srv_err("400 Bad Request", "input", "role must be \"rw\" or \"ro\"")
+            return
+        }
+        ntok := tn_issue_token(target_tid, new_role)
+        res = srv_ok("{\"token\":\"" + ntok + "\",\"role\":\"" + new_role + "\",\"tenant\":\"" + jesc(target_tid) + "\"}")
+        return
+    }
+    handled = 0
+}
