@@ -1451,9 +1451,14 @@ existed. That is now documented.
 - **One older unexplained flake.** A crash-harness run in M33 failed once and
   has never reproduced. I destroyed its output before reading it. It is recorded
   here rather than forgotten.
-- **No automated failover.** The follower is read-only; promoting it is manual.
-  Replication lag is not monitored.
-- **No RBAC.** Just an admin token + tenant tokens.
+- ~~**No automated failover.**~~ `POST /promote` (admin only) flips a
+  `--follow` follower to primary in one request — the data is already local.
+  The operator still needs a watchdog script to call it when the primary is
+  down; the primitive is there, the wiring is yours. Replication lag is still
+  not monitored.
+- ~~**No RBAC.**~~ `POST /tokens` issues read-only (`ro`) or read-write (`rw`)
+  tokens per tenant. The admin token is unchanged; existing tokens default to
+  `rw` and keep working. Tokens persist in `_sys` and survive restart.
 - **npm is a version behind** pending an OTP only the owner can supply; PyPI and
   Go are current.
 

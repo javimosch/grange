@@ -60,6 +60,16 @@ Windows, but a database server needs POSIX, so those targets are not useful
 here. On another platform, build it yourself — `make build` needs only
 [machin](https://github.com/javimosch/machin).
 
+## Quickstart (self-hosted)
+
+```sh
+./scripts/quickstart.sh [PORT]
+```
+
+Builds grange, creates a data dir, starts the server, verifies `/health`, and
+prints the admin token + next steps. Under two minutes from zero to running.
+Idempotent — safe to re-run.
+
 First run, end to end:
 
 ```sh
@@ -300,12 +310,20 @@ multi-tenant SLAs, or unattended operation. The gaps, named rather than omitted:
   author wrote. No harness can close this.
 - **Single-actor server.** One request at a time. An expensive query blocks
   everyone (budgets and replicas mitigate, not fix). This is a real ceiling.
-- **No automated failover.** The follower is read-only; promoting it is manual.
-- **No RBAC.** Just an admin token + tenant tokens.
+  `GRANGE_CONCURRENT_READS=1` auto-spawns a read replica to bound it.
+- ~~**No automated failover.**~~ `POST /promote` (admin) flips a follower to
+  primary in one request. The operator still needs a watchdog script to call it
+  when the primary is down — the primitive is there, the wiring is yours.
+- ~~**No RBAC.**~~ `POST /tokens` issues read-only (`ro`) or read-write (`rw`)
+  tokens per tenant. The admin token is unchanged; existing tokens default to
+  `rw` and keep working.
 - **Memory is bounded, not proven flat.** The watchdog restarts rather than
-  prevents. Hot collections scale with data.
-- **Nobody but its author has run it.** Until someone else deploys it, the
-  claims are one-operator claims.
+  prevents; `GRANGE_RESET_EVERY` reclaims the arena between requests (gentler
+  than a restart). Hot collections scale with data. `GET /memory` reports the
+  full picture.
+- **Nobody but its author has run it.** `scripts/quickstart.sh` gets a stranger
+  from zero to a running server in under two minutes. Until someone else
+  deploys it, the claims are one-operator claims.
 
 ## Telemetry
 
@@ -339,8 +357,9 @@ grange is the reference implementation.
   when it returns, and the single-actor loop never returns, so page reads and
   response building accumulate. Hot paths that can be arena-scoped are, and the
   RSS watchdog (`GRANGE_MAX_RSS_MB`) restarts the process before it hurts —
-  crash-safety makes that a non-event. Per-request arena scoping is the next
-  engine milestone.
+  crash-safety makes that a non-event. `GRANGE_RESET_EVERY` reclaims the arena
+  between requests (gentler than a restart, re-opens the current collection).
+  `GET /memory` reports the full picture.
 - Hot collections keep the whole dataset + indexes in memory (memtable = the db); segments make cold open fast, not memory small. Steady-state RSS at 100k docs + 1 index is ~120 MB (fresh process); the bench process peaks at ~440 MB from MFL arena temporaries — a memory diet is the standing target.
 - `--where` supports equality + numeric ranges. Equality clauses use buckets; range clauses on a
   `--range` field use the sorted projection (built lazily on the first range query after a write —
