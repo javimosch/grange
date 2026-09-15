@@ -346,8 +346,26 @@ func srv_handle(req) (res) {
         res = pres
         return
     }
-    if g_srv_follow == 1 && req.method == "POST" && req.path != "/shutdown" {
-        res = srv_err("403 Forbidden", "read-only", "this is a follower; write to the primary")
+    // POST /promote — flip a follower to primary (accept writes). Admin only.
+    // This is the automated-failover primitive: when the primary is down, an
+    // operator (or a watchdog script) POSTs /promote to the follower, which
+    // unsets g_srv_follow so it stops refusing writes. The data is already
+    // local (same-directory --follow refreshes from disk on every read), so
+    // promotion is instant. Retrocompatible: a non-follower ignores /promote
+    // (it's already the primary).
+    if req.method == "POST" && (srv_route(req.path, "/promote")) {
+        if role != "admin" {
+            res = srv_err("403 Forbidden", "auth", "admin only")
+            return
+        }
+        was_following := g_srv_follow
+        g_srv_follow = 0
+        gr_refresh()
+        res = srv_ok("{\"promoted\":true,\"was_follower\":" + str(was_following) + ",\"msg\":\"this server now accepts writes\"}")
+        return
+    }
+    if g_srv_follow == 1 && req.method == "POST" && req.path != "/shutdown" && req.path != "/promote" {
+        res = srv_err("403 Forbidden", "read-only", "this is a follower; write to the primary (POST /promote to flip)")
         return
     }
     if req.method == "POST" && (srv_route(req.path, "/shutdown")) && role != "admin" {
