@@ -285,10 +285,31 @@ truthful, `make doccoverage` checks it is complete, by enumerating every verb,
 route, `GRANGE_*` variable, flag and operator out of the source and failing on
 any that the guide does not document.
 
-**Is it production ready?** The verdict, including what is *not* ready, is at the
-end of [docs/OPERATIONS.md](docs/OPERATIONS.md) — the short version is that it is
-suitable for a service whose failure you can tolerate, and that its one
-irreducible gap is that nobody but its author has run it.
+**Is it production ready?** No. The full verdict, including what is *not*
+ready, is in [docs/OPERATIONS.md](docs/OPERATIONS.md). The short version:
+
+**Suitable for:** a service whose failure you can tolerate, run by someone who
+reads the `mode` field. It has been operated in production continuously, has
+survived its own fuzzes and crash harnesses, and reports what it costs.
+
+**Not suitable for:** enterprise customers, high-availability promises,
+multi-tenant SLAs, or unattended operation. The gaps, named rather than omitted:
+
+- **Adoption is approximately zero.** Two consumers exist (poche, the vigie
+  mirror). Every performance and durability claim is measured on a workload the
+  author wrote. No harness can close this.
+- **Single-actor server.** One request at a time. An expensive query blocks
+  everyone (budgets and replicas mitigate, not fix). This is a real ceiling.
+- **Cold crash recovery has a flake.** `make crash`'s cold round fails ~1 in 3
+  runs with "cold collection has no valid run manifest for its generation". A
+  database that occasionally loses data on crash is not production-ready. This
+  is the most important gap to fix.
+- **No automated failover.** The follower is read-only; promoting it is manual.
+- **No RBAC.** Just an admin token + tenant tokens.
+- **Memory is bounded, not proven flat.** The watchdog restarts rather than
+  prevents. Hot collections scale with data.
+- **Nobody but its author has run it.** Until someone else deploys it, the
+  claims are one-operator claims.
 
 ## Telemetry
 

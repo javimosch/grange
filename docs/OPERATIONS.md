@@ -1412,10 +1412,19 @@ existed. That is now documented.
   scan budgets refuse rather than degrade.
 - **Alerting.** `/ready` distinguishes liveness from readiness, alerts on
   transitions only, and — since M49 — reports sibling units in restart loops.
+  Disk-space monitoring (statvfs) reports `disk_free_mb` and `disk_near_full`
+  since the M52 hardening round, so a filling disk surfaces before writes 507.
 - **The product path.** Signup → write → query → bill, walked end to end
   against the hosted instance with a real payment-rail wallet.
 - **Documentation.** As above, enforced by two harnesses from both directions:
   nothing present is undocumented, nothing documented is missing.
+- **Hardening (M52).** Malformed JSON fuzzing, concurrent write stress,
+  disk-full handling, HTTP rate limiting, query injection prevention, index
+  corruption detection with auto-recovery, backup data verification, WAL
+  partial-write recovery. Production hardening: graceful SIGTERM drain (in-flight
+  requests complete, parked watchers get 503), configurable body limits and
+  timeouts, aggregate request deadline, `/metrics` endpoint (admin-gated),
+  CI workflow, perrus-cli monitoring on both primary and follower `/ready`.
 
 ### Not ready, and why
 
@@ -1430,9 +1439,19 @@ existed. That is now documented.
   prevents, and `GRANGE_RESET_EVERY` is opt-in because a reset cannot preserve a
   generated token (M38). Cold storage keeps 200k documents at 4.4 MB RSS; hot
   collections still scale with data.
-- **One unexplained flake.** A crash-harness run in M33 failed once and has
-  never reproduced. I destroyed its output before reading it. It is recorded
+- **Cold crash recovery has a flake.** `make crash`'s cold round
+  (`crash_cold_test.sh`) fails approximately 1 in 3 runs with "cold collection
+  has no valid run manifest for its generation". The hot rounds and the
+  differential fuzzes pass consistently; the failure is specific to the cold
+  crash path. A database that occasionally loses data on crash is not
+  production-ready, and this is the most important gap to fix. The M33 flake
+  (below) may be the same root cause.
+- **One older unexplained flake.** A crash-harness run in M33 failed once and
+  has never reproduced. I destroyed its output before reading it. It is recorded
   here rather than forgotten.
+- **No automated failover.** The follower is read-only; promoting it is manual.
+  Replication lag is not monitored.
+- **No RBAC.** Just an admin token + tenant tokens.
 - **npm is a version behind** pending an OTP only the owner can supply; PyPI and
   Go are current.
 
@@ -1442,4 +1461,5 @@ Suitable for a service whose failure you can tolerate, run by someone who reads
 the `mode` field. It has been operated in production continuously, has survived
 its own fuzzes and crash harnesses, and reports what it costs. It has not been
 operated by anyone but me, and until it has, "production ready" means ready for
-*this* production.
+*this* production. The cold crash flake is the one thing that would make even
+*this* production unsafe to trust without a watchdog-and-restart safety net.
