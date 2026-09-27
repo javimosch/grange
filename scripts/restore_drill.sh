@@ -11,9 +11,9 @@
 # document counts and an integrity check. It touches nothing live: the restore
 # target is a temp directory and the live data is only read.
 #
-#   restore_drill.sh --backups /home/dk1/backups/grange --live /home/dk1/grange/data
+#   restore_drill.sh --backups /srv/backups/grange --live /srv/grange/data
 set -u
-BIN="${GRANGE_BIN:-/home/dk1/grange/grange}"
+BIN="${GRANGE_BIN:-$(dirname "$0")/grange}"
 BACKUPS=""
 LIVE=""
 while [ $# -gt 0 ]; do

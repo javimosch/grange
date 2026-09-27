@@ -237,7 +237,7 @@ func srv_handle(req) (res) {
         return
     }
     // /metrics — Prometheus text exposition. Requires the admin bearer token:
-    // the default bind is loopback, but behind a reverse proxy (Traefik on dk1)
+    // the default bind is loopback, but behind a reverse proxy (e.g. Traefik)
     // the loopback gate is bypassed, so /metrics would be publicly exposed
     // without auth. Exposes request count, arena resets, document count, WAL
     // sequence, RSS, and loaded collections — enough for an operator or

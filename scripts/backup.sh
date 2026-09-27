@@ -13,9 +13,9 @@
 # and record stream, a cold manifest against its pages, and the declared indexes.
 # It exits 92 when anything is wrong. A backup nobody verified is a hope.
 #
-#   backup.sh --db /home/dk1/grange/data --out /home/dk1/backups/grange [--keep 7]
+#   backup.sh --db /srv/grange/data --out /srv/backups/grange [--keep 7]
 set -u
-BIN="${GRANGE_BIN:-/home/dk1/grange/grange}"
+BIN="${GRANGE_BIN:-$(dirname "$0")/grange}"
 DB=""
 OUT=""
 KEEP=7

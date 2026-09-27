@@ -114,7 +114,7 @@ because a message every 15 minutes while something is wrong gets muted, which is
 worse than no alert. It also distinguishes `down` (no response) from `failing`
 (responding, sick) — conflating them sends a misleading page.
 
-On dk1: `grange-ready.timer` every 15 minutes, Telegram on transition.
+On the hosted instance: `grange-ready.timer` every 15 minutes, Telegram on transition.
 
 ## Backups
 
@@ -139,7 +139,7 @@ that copies only `--db` silently omits every paying customer. This one takes bot
 and lays them out as `<stamp>/<name>` and `<stamp>/<name>.tenants`, so restoring
 is a copy back into place with no renaming.
 
-Run it from a timer, not by hand — on dk1 it is `grange-backup.timer` at 03:30
+Run it from a timer, not by hand — on the hosted instance it is `grange-backup.timer` at 03:30
 UTC with `Persistent=true`. Until M45 the release notes claimed nightly backups
 and there was no timer, no cron and no backup directory at all.
 

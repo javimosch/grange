@@ -327,7 +327,7 @@ grange — it is one tenant's own machine, and refusing their own query helps
 nobody. The hosted unit file sets them.
 
 Choosing a number: a budget is a latency bound, not a size bound. At roughly
-600k documents/second of scanning on dk1, 50k documents is ~80 ms of actor time,
+600k documents/second of scanning on the hosted instance, 50k documents is ~80 ms of actor time,
 which is the longest another tenant should wait behind one request. Divide the
 tolerable queueing delay by that rate rather than picking a round number.
 
@@ -942,7 +942,7 @@ client that fires a write and reads a replica without waiting can miss it.
 
 ### Deploying it
 
-dk1 already has the app registered from an earlier experiment
+The hosted instance already has the app registered from an earlier experiment
 (`grange-read` → `read.grange.intrane.fr`, port 8802). A replica needs the same
 `--db`, the same `--token`, and `--follow`; give it its own systemd unit with
 `Restart=always`, exactly like the writer.
@@ -1086,7 +1086,7 @@ if role == "tenant" {
 
 That resolves a tenant's data directory, and in a callee taking `root` BY VALUE
 it assigns a copy that is discarded on return. Every tenant data request then
-opened the ADMIN root instead. On dk1 that surfaced as `stats` reporting
+opened the ADMIN root instead. On the hosted instance that surfaced as `stats` reporting
 `docs: 0` for a collection holding 1123 documents, and ordering failing with
 "needs a range index" on a collection that had one.
 
@@ -1154,7 +1154,7 @@ half of a backup. The layout is now `<stamp>/<name>` and
 place with no renaming, and the harness asserts that one backup is one retention
 entry.
 
-### On dk1
+### On the hosted instance
 
 `grange-backup.timer` at 03:30 UTC, `Persistent=true`, keeping 7. Verified
 against production data: the restored copy of the live analytics mirror counted
@@ -1201,7 +1201,7 @@ first observation, when it deliberately sends nothing. It now reports
 `transition` (the state changed) and `notified` (a message was actually sent)
 separately.
 
-Verified end to end on dk1: the first timer run caught a restarting server as
+Verified end to end on the hosted instance: the first timer run caught a restarting server as
 `failing`, the next saw `ok`, and the transition sent a recovery notice.
 `/ready` on the primary reports `backup_age_hours: 0` against the nightly job,
 and the replica correctly reports `role: follower`.
@@ -1303,7 +1303,7 @@ tenant ones, which are the collections that are somebody's paid data. Then it
 writes a document to the restored copy, because restoring into a read-only
 museum piece is not a recovery. It touches nothing live.
 
-On dk1:
+On the hosted instance:
 
 ```
 {"ok":true,"backup":"20260730T080333Z","age_hours":4,"admin_collections_checked":1,
@@ -1343,7 +1343,7 @@ knew nothing about it.
 `grange-read` is the one to keep — it carries `GRANGE_MAX_RSS_MB=100` and
 `GRANGE_MAX_SCAN_DOCS=50000`, which the bare duplicate did not. The duplicate is
 disabled and its unit file moved to
-`/home/dk1/grange/grange-follower.service.removed-M49`.
+`/srv/grange/grange-follower.service.removed-M49`.
 
 The lesson is not about a duplicate unit. It is that a permanently failing
 service next to a healthy one produced no signal anywhere — worth a check that

@@ -1,4 +1,4 @@
-const { Grange } = require('/home/jarancibia/ai/grange/sdk/node');
+const { Grange } = require('../sdk/node');
 (async () => {
   const g = new Grange({ url: 'http://localhost:4482', token: 'gt_18017a66b3503f9d2bce3d676f32feea' }).db('perf').coll('docs');
   // atomicity: batch with a bad line applies nothing
