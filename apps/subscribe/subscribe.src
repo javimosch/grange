@@ -15,6 +15,11 @@
 var s_grange = Grange{base: "", token: "", db: "default", coll: "subscribers"}
 var s_rl_win = make(map[string]int)
 var s_rl_n = make(map[string]int)
+// Optional lead forward: after a signup is stored, POST it to a form hook
+// (a bkn "forms" hook, which dedupes and can forward to a CRM). Off unless
+// --forward / GRANGE_SUB_FORWARD is set; failure never fails the signup.
+var s_fwd_url = ""
+var s_fwd_form = "grange-subscribe"
 
 func sub_res(fd, status, body) {
     out := "HTTP/1.1 " + status + "\r\nContent-Type: application/json\r\nContent-Length: " + str(len(body)) + "\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, GET, OPTIONS\r\nAccess-Control-Allow-Headers: content-type\r\nConnection: close\r\n\r\n" + body
@@ -60,6 +65,20 @@ func sub_limited(ip) (yes) {
     if s_rl_n[ip] > 5 { yes = 1 }
 }
 
+// sub_forward — best-effort POST of a new signup to the configured form hook.
+// Runs after the response is written and the connection closed, so a slow or
+// failing hook only delays the next request, never this one's answer.
+func sub_forward(email) {
+    if len(s_fwd_url) == 0 { return }
+    body := "{\"form\":\"" + s_fwd_form + "\",\"fields\":{\"email\":\"" + email + "\",\"source\":\"grange-landing\",\"company_url\":\"\"}}"
+    status, resp, herr := http_request("POST", s_fwd_url, []string{"content-type: application/json"}, body)
+    if len(herr) > 0 || status < 200 || status > 299 {
+        write(2, "{\"event\":\"forward.failed\",\"email\":\"" + email + "\",\"status\":" + str(status) + "}\n")
+        return
+    }
+    write(2, "{\"event\":\"forwarded\",\"email\":\"" + email + "\"}\n")
+}
+
 func sub_handle(fd, req) {
     if req.method == "OPTIONS" {
         sub_res(fd, "204 No Content", "")
@@ -94,6 +113,7 @@ func sub_handle(fd, req) {
         n := grange_count(s_grange, "")
         write(2, "{\"event\":\"subscribed\",\"email\":\"" + email + "\",\"total\":" + str(n) + "}\n")
         sub_res(fd, "200 OK", "{\"ok\":true,\"data\":{\"subscribed\":true,\"subscribers\":" + str(n) + "}}")
+        sub_forward(email)
         return
     }
     sub_res(fd, "404 Not Found", "{\"ok\":false,\"error\":{\"type\":\"not-found\",\"message\":\"POST /subscribe (text/plain email body) or GET /count\"}}")
@@ -104,11 +124,16 @@ func main() {
     fs = flag_int(fs, "port", "p", "8803", "HTTP port")
     fs = flag_str(fs, "grange", "g", "https://grange.intrane.fr", "grange base URL")
     fs = flag_str(fs, "token", "t", "", "grange tenant token (or GRANGE_SUB_TOKEN)")
+    fs = flag_str(fs, "forward", "f", "", "form hook URL to forward each signup to (or GRANGE_SUB_FORWARD); off when empty")
+    fs = flag_str(fs, "forward-form", "", "grange-subscribe", "form id sent to the forward hook")
     fs = parse_flags(fs, args())
     if flag_on(fs, "help") { println(flag_usage(fs))  return }
     tok := flag_get(fs, "token")
     if len(tok) == 0 { tok = env("GRANGE_SUB_TOKEN") }
     if len(tok) == 0 { write(2, "{\"error\":\"missing --token / GRANGE_SUB_TOKEN\"}\n")  exit(81) }
+    s_fwd_url = flag_get(fs, "forward")
+    if len(s_fwd_url) == 0 { s_fwd_url = env("GRANGE_SUB_FORWARD") }
+    s_fwd_form = flag_get(fs, "forward-form")
     s_grange = grange_client(flag_get(fs, "grange"), tok)
     s_grange = grange_use(s_grange, "default", "subscribers")
     port := flag_int_val(fs, "port")
